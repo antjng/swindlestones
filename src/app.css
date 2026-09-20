@@ -1,8 +1,100 @@
 :root {
-  color-scheme: light dark;
-  font: 16px/1.5 system-ui, 'Segoe UI', Roboto, sans-serif;
+  --paper: #eadcbc;
+  --paper-light: #f4e9cf;
+  --paper-shade: #cdb98c;
+  --ink: #2a1f14;
+  --ink-soft: #5e4c37;
+  --blood: #8a2b1c;
+  --font-body: 'IM Fell English', 'Iowan Old Style', Georgia, serif;
+  --font-caps: 'IM Fell English SC', 'IM Fell English', Georgia, serif;
+
+  color-scheme: light;
+  color: var(--ink);
+  font: 19px/1.55 var(--font-body);
+}
+
+html,
+body {
+  height: 100%;
 }
 
 body {
   margin: 0;
+  overflow: hidden;
+  background: #050302;
+}
+
+h1,
+h2,
+summary {
+  font-family: var(--font-caps);
+  font-weight: normal;
+  letter-spacing: 0.06em;
+}
+
+button,
+select {
+  font: inherit;
+  font-family: var(--font-caps);
+  letter-spacing: 0.06em;
+  color: var(--ink);
+  background: var(--paper-light);
+  border: 2px solid var(--ink);
+  border-radius: 2px;
+  padding: 0.3rem 1rem;
+}
+
+button {
+  cursor: pointer;
+  box-shadow: 2px 2px 0 var(--ink);
+}
+
+button:hover:not(:disabled) {
+  background: var(--ink);
+  color: var(--paper-light);
+}
+
+button:active:not(:disabled) {
+  transform: translate(2px, 2px);
+  box-shadow: none;
+}
+
+button:disabled,
+select:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+button:focus-visible,
+select:focus-visible,
+summary:focus-visible {
+  outline: 2px solid var(--blood);
+  outline-offset: 2px;
+}
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  background: rgba(20, 12, 4, 0.7);
+}
+
+.modal {
+  max-width: 34rem;
+  max-height: 90vh;
+  overflow: auto;
+  padding: 1.5rem 2rem;
+  background: var(--paper-light);
+  border: 3px double var(--ink);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+.modal h2 {
+  margin: 0 0 0.75rem;
+  text-align: center;
+  font-size: 1.8rem;
 }
