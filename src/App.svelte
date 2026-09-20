@@ -1,13 +1,12 @@
 <script lang="ts">
-  // Milestone 1 throwaway demo: proves the rules engine plays a complete,
-  // correct match end-to-end before any rendering work begins. Both sides
-  // are driven by the AI heuristic here just to exercise the reducer;
-  // this page gets replaced by the real UI/3D scene in later milestones.
+  // Debug harness: plays a full match with the AI on both sides to exercise
+  // the rules engine independently of the UI.
   import { DEFAULT_AI_CONFIG, decideAiAction } from './lib/game/ai';
   import { createInitialMatchState, reduce } from './lib/game/match';
   import type { MatchAction, MatchState } from './lib/game/match';
   import { mulberry32, randomSeed } from './lib/game/rng';
   import type { PlayerId } from './lib/game/types';
+  import GameView from './lib/components/GameView.svelte';
 
   let seed = $state(randomSeed());
   let log = $state<{ action: MatchAction | { type: 'initial' }; state: MatchState }[]>([]);
@@ -49,15 +48,21 @@
 </script>
 
 <main>
-  <h1>Swindlestones — rules engine demo</h1>
-  <p>Seed: <code>{seed}</code></p>
-  <button onclick={playFullMatch}>Play full match</button>
-  <button onclick={reroll}>New seed</button>
+  <h1>Swindlestones</h1>
 
-  {#if log.length > 0}
-    <p>{log.length} actions. Match winner: <strong>{log.at(-1)?.state.winner}</strong></p>
-    <pre>{JSON.stringify(log, null, 2)}</pre>
-  {/if}
+  <GameView />
+
+  <details class="debug">
+    <summary>Debug: rules engine demo</summary>
+    <p>Seed: <code>{seed}</code></p>
+    <button onclick={playFullMatch}>Play full match</button>
+    <button onclick={reroll}>New seed</button>
+
+    {#if log.length > 0}
+      <p>{log.length} actions. Match winner: <strong>{log.at(-1)?.state.winner}</strong></p>
+      <pre>{JSON.stringify(log, null, 2)}</pre>
+    {/if}
+  </details>
 </main>
 
 <style>
@@ -66,6 +71,11 @@
     margin: 0 auto;
     padding: 1.5rem;
     font-family: system-ui, sans-serif;
+  }
+  .debug {
+    margin-top: 2rem;
+    border-top: 1px solid #ccc;
+    padding-top: 1rem;
   }
   pre {
     max-height: 60vh;
