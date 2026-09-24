@@ -14,7 +14,7 @@ export type { OpponentMood } from './Opponent';
 
 const HAND_COVER_HEIGHT = 0.85;
 
-const COVER_WRIST_BEHIND = 2.0;
+const COVER_WRIST_BEHIND = 2.1;
 const HAND_HOME = new THREE.Vector3(OPPONENT_X - 1.0, 2.6, AI_DICE_CENTER.z - 4.4);
 
 const TARGET_BUFFER_HEIGHT = 560;
@@ -28,6 +28,14 @@ function clusterPositions(count: number, center: THREE.Vector3, spacing: number)
   return Array.from({ length: count }, (_, i) => {
     const angle = offset + (i / count) * Math.PI * 2;
     return new THREE.Vector3(center.x + Math.cos(angle) * radius, DIE_REST_HEIGHT, center.z + Math.sin(angle) * radius);
+  });
+}
+
+/** Two staggered columns, narrow enough for one hand to cover, with the dice still clear of each other. */
+function stackPositions(count: number, center: THREE.Vector3): THREE.Vector3[] {
+  return Array.from({ length: count }, (_, i) => {
+    const row = i - (count - 1) / 2;
+    return new THREE.Vector3(center.x + (i % 2 === 0 ? -0.46 : 0.46), DIE_REST_HEIGHT, center.z + row * 0.62);
   });
 }
 
@@ -112,7 +120,7 @@ export class SceneManager {
     if (!this.coveringDice) return;
     this.opponent.glanceAt(AI_DICE_CENTER, 1.6);
     const rest = this.aiHand.position.clone();
-    const length = 4.4;
+    const length = 4;
     await this.tweens.run(1100, (t) => {
       const lift = Math.sin(Math.min(1, t * 1.2) * Math.PI) * 0.55;
       if (!this.coveringDice) return;
@@ -199,7 +207,7 @@ export class SceneManager {
   }
 
   private async opponentCoversDice(faces: readonly Face[]): Promise<void> {
-    const positions = clusterPositions(faces.length, AI_DICE_CENTER, 0.56);
+    const positions = stackPositions(faces.length, AI_DICE_CENTER);
     this.aiDice = faces.map((face, i) => {
       const die = createDieMesh('ai');
       die.visible = false;

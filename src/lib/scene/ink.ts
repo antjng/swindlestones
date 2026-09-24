@@ -106,13 +106,29 @@ export function penStroke(
   ctx.fill();
 }
 
+/**
+ * Outlines a closed shape the way a pen would: a firm pass round most of it, then a
+ * lighter second pass that wanders slightly off and stops short, so the line varies.
+ */
 export function outlineShape(
   ctx: CanvasRenderingContext2D,
   points: readonly Pt[],
   width: number,
   rand: Rng,
 ): void {
-  penStroke(ctx, [...points, points[0], points[1]], width, rand, { taper: 0, wobble: 0.7 });
+  const n = points.length;
+  for (let pass = 0; pass < 2; pass++) {
+    const start = Math.floor(rand() * n);
+    const count = Math.floor(n * (pass === 0 ? 1 : 0.5 + rand() * 0.35));
+    const drift = pass === 0 ? 0.5 : 1.3;
+    const phase = rand() * 10;
+    const stroke: Pt[] = [];
+    for (let i = 0; i <= count; i++) {
+      const [x, y] = points[(start + i) % n];
+      stroke.push([x + Math.sin(i * 0.21 + phase) * drift, y + Math.cos(i * 0.17 + phase) * drift]);
+    }
+    penStroke(ctx, stroke, width * (pass === 0 ? 0.85 : 0.5), rand, { taper: pass === 0 ? 0.2 : 0.8, wobble: 0.3 });
+  }
 }
 
 export function line(
@@ -164,11 +180,34 @@ export function hatch(
       const y = cy + dir[1] * s + nrm[1] * offset;
       if (shade(x, y) > threshold * 0.95) {
         run.push([x + (rand() - 0.5) * 0.8, y + (rand() - 0.5) * 0.8]);
+        // Real hatching is short strokes, not long unbroken lines.
+        if (run.length > 5 + Math.floor(rand() * 5)) flush();
       } else {
         flush();
       }
     }
     flush();
+  }
+  ctx.restore();
+}
+
+/** Faint paper fibres and stains over whatever is already drawn. */
+export function paperGrain(ctx: CanvasRenderingContext2D, width: number, height: number, rand: Rng): void {
+  ctx.save();
+  ctx.globalCompositeOperation = 'source-atop';
+  for (let i = 0; i < width * height * 0.0025; i++) {
+    ctx.fillStyle = `rgba(70,52,30,${rand() * 0.1})`;
+    ctx.fillRect(rand() * width, rand() * height, 1 + rand() * 2, 1 + rand() * 1.5);
+  }
+  for (let i = 0; i < 40; i++) {
+    const x = rand() * width;
+    const y = rand() * height;
+    ctx.strokeStyle = `rgba(90,70,45,${rand() * 0.07})`;
+    ctx.lineWidth = 0.6;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + (rand() - 0.5) * 30, y + (rand() - 0.5) * 12);
+    ctx.stroke();
   }
   ctx.restore();
 }

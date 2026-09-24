@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { FINGER_X, KNUCKLE_Y, PALM_PX, PALM_WRIST, SEGMENT_ANCHOR, SEGMENT_LENGTHS, SEGMENT_WIDTH, drawPalm, drawSegment } from './handArt';
 import { Spring } from './spring';
 
-export const HAND_UNIT = 0.0165;
+export const HAND_UNIT = 0.017;
 
 export interface HandPose {
   /** How far each finger (index to little) is curled, 0 straight to 1 fist. */
@@ -24,7 +24,7 @@ export const HAND_POSES = {
 
 export type HandPoseName = keyof typeof HAND_POSES;
 
-const FINGER_LENGTH = [0.95, 1, 0.92, 0.74] as const;
+const FINGER_LENGTH = [0.95, 1, 0.92, 0.75] as const;
 const FINGER_WIDTH = [1.02, 1.06, 1.0, 0.86] as const;
 const CURL = [1.3, 1.55, 1.15] as const;
 
@@ -97,7 +97,7 @@ export class HandRig {
     });
 
     const thumbGroup = new THREE.Group();
-    thumbGroup.position.set(-58 * HAND_UNIT, -84 * HAND_UNIT, 0.007);
+    thumbGroup.position.set(-48 * HAND_UNIT, -74 * HAND_UNIT, 0.007);
     const thumbBones = ([1, 2] as const).map((k) => {
       const bone = new THREE.Mesh(segmentGeometries[k], material(segments[k], tint));
       thumbGroup.add(bone);
@@ -156,7 +156,7 @@ export class HandRig {
     let y = 0;
     this.thumb.bones.forEach((bone, k) => {
       bone.position.y = y;
-      bone.scale.set(1.2, shorten * (k === 0 ? 0.9 : 0.85), 1);
+      bone.scale.set(1.25, shorten * (k === 0 ? 0.95 : 0.9), 1);
       y -= SEGMENT_LENGTHS[k + 1] * bone.scale.y * HAND_UNIT;
     });
   }

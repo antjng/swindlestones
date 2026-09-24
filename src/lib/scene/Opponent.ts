@@ -10,9 +10,9 @@ import {
   MOUSTACHE_BOX,
   SLEEVE_PX,
   drawBeard,
+  drawCowl,
   drawEyes,
   drawHead,
-  drawMantle,
   drawMoustache,
   drawMouth,
   drawSleeve,
@@ -26,19 +26,17 @@ export type OpponentMood = 'idle' | 'thinking' | 'calling' | 'tense' | 'smug' | 
 /** The cut-out leans back by this much so it faces the camera's downward view. */
 const STAGE_TILT = -0.5;
 
-const TORSO_UNIT = 0.0075;
-const HEAD_UNIT = 0.0048;
-const SLEEVE_UNIT = 0.0078;
+/** World units per drawing unit, shared by every part of the figure so its proportions hold. */
+const UNIT = 0.0105;
 
-const SLEEVE_LENGTH = 380 * SLEEVE_UNIT;
-const SHOULDER_X = 1.7;
-const SHOULDER_Y = 2.5;
-const NECK_Y = 2.6;
+const SLEEVE_LENGTH = (440 - 16) * UNIT;
+const SHOULDER_X = 2.5;
+const SHOULDER_Y = 1.5;
 
-const HEAD_LIFT = 1.2;
-
-/** Drawn larger than life so the face reads at this distance. */
-const HEAD_SCALE = 1.25;
+/** Where the top of the habit, the top of the bunched cowl, and the base of the neck sit. */
+const TORSO_TOP = 2.9;
+const COWL_TOP = TORSO_TOP + 0.73;
+const NECK_Y = TORSO_TOP - 0.35;
 
 const SPRITE_TINT = 0xf0e6d2;
 
@@ -163,7 +161,7 @@ class PuppetHand {
 }
 
 /**
- * The opponent: a layered cut-out puppet (torso, mantle, head, jaw and beard,
+ * The opponent: a layered cut-out puppet (torso, cowl, head, jaw and beard,
  * eyes, sleeves, articulated hands). Springs give the beard, jaw and
  * shoulders follow-through.
  */
@@ -175,7 +173,7 @@ export class Opponent {
 
   private readonly stage = new THREE.Group();
   private readonly torso: Sprite;
-  private readonly mantle: Sprite;
+  private readonly cowl: Sprite;
   private readonly headPivot = new THREE.Group();
   private readonly face = new THREE.Group();
   private readonly jaw = new THREE.Group();
@@ -217,29 +215,28 @@ export class Opponent {
   private readonly gazeGoal = new THREE.Vector3(0, 3, 7);
 
   constructor() {
-    this.stage.position.set(OPPONENT_X, -1.5, OPPONENT_Z);
+    this.stage.position.set(OPPONENT_X, -2.3, OPPONENT_Z);
     this.stage.rotation.x = STAGE_TILT;
     this.stage.scale.setScalar(1.2);
     this.group.add(this.stage);
 
-    this.torso = createSprite(drawTorso(), TORSO_UNIT);
-    this.mantle = createSprite(drawMantle(), TORSO_UNIT);
-    this.stage.add(this.torso.group, this.mantle.group);
-    this.mantle.group.position.z = 0.02;
+    this.torso = createSprite(drawTorso(), UNIT, [0.5, 1]);
+    this.cowl = createSprite(drawCowl(), UNIT, [0.5, 1]);
+    this.stage.add(this.torso.group, this.cowl.group);
+    this.cowl.group.position.z = 0.02;
 
-    this.sleeves = [createSprite(drawSleeve(), SLEEVE_UNIT, [0.5, 1 - 16 / SLEEVE_PX.height]), createSprite(drawSleeve(), SLEEVE_UNIT, [0.5, 1 - 16 / SLEEVE_PX.height])];
+    this.sleeves = [createSprite(drawSleeve(), UNIT, [0.5, 1 - 16 / SLEEVE_PX.height]), createSprite(drawSleeve(), UNIT, [0.5, 1 - 16 / SLEEVE_PX.height])];
     for (const sleeve of this.sleeves) this.stage.add(sleeve.group);
 
     this.headPivot.position.set(0, NECK_Y, 0.2);
     this.stage.add(this.headPivot);
-    const head = createSprite(drawHead(), HEAD_UNIT);
-    head.group.position.y = HEAD_LIFT;
+    const head = createSprite(drawHead(), UNIT, [0.5, 0]);
     this.headPivot.add(head.group, this.face);
 
-    const headPoint = (x: number, y: number) => new THREE.Vector3((x - HEAD_PX.width / 2) * HEAD_UNIT, HEAD_LIFT + (HEAD_PX.height / 2 - y) * HEAD_UNIT, 0);
+    const headPoint = (x: number, y: number) => new THREE.Vector3((x - HEAD_PX.width / 2) * UNIT, (HEAD_PX.height - y) * UNIT, 0);
 
-    this.mouth = createSprite(drawMouth(), HEAD_UNIT);
-    this.mouth.group.position.copy(headPoint(240, 448)).setZ(0.01);
+    this.mouth = createSprite(drawMouth(), UNIT);
+    this.mouth.group.position.copy(headPoint(170, 300)).setZ(0.01);
     this.mouth.group.scale.y = 0.001;
     this.face.add(this.mouth.group);
 
@@ -248,23 +245,23 @@ export class Opponent {
     this.eyesTexture = new THREE.CanvasTexture(eyesCanvas);
     this.eyesTexture.colorSpace = THREE.SRGBColorSpace;
     const eyes = new THREE.Mesh(
-      new THREE.PlaneGeometry(EYES_STRIP.width * HEAD_UNIT, EYES_STRIP.height * HEAD_UNIT),
+      new THREE.PlaneGeometry(EYES_STRIP.width * UNIT, EYES_STRIP.height * UNIT),
       new THREE.MeshBasicMaterial({ map: this.eyesTexture, alphaTest: 0.3, color: SPRITE_TINT }),
     );
     eyes.position.copy(headPoint(HEAD_PX.width / 2, EYES_STRIP.top + EYES_STRIP.height / 2)).setZ(0.02);
     this.face.add(eyes);
 
-    const moustache = createSprite(drawMoustache(), HEAD_UNIT);
+    const moustache = createSprite(drawMoustache(), UNIT);
     moustache.group.position.copy(headPoint(MOUSTACHE_BOX.x + MOUSTACHE_BOX.width / 2, MOUSTACHE_BOX.y + MOUSTACHE_BOX.height / 2)).setZ(0.03);
     this.face.add(moustache.group);
 
-    const hinge = { x: 240, y: 430 };
-    const beard = createSprite(drawBeard(), HEAD_UNIT, [(hinge.x - BEARD_BOX.x) / BEARD_BOX.width, 1 - (hinge.y - BEARD_BOX.y) / BEARD_BOX.height]);
+    const hinge = { x: 170, y: 304 };
+    const beard = createSprite(drawBeard(), UNIT, [(hinge.x - BEARD_BOX.x) / BEARD_BOX.width, 1 - (hinge.y - BEARD_BOX.y) / BEARD_BOX.height]);
     this.jaw.position.copy(headPoint(hinge.x, hinge.y)).setZ(0.035);
     this.jaw.add(beard.group);
     this.face.add(this.jaw);
 
-    this.chin.position.copy(headPoint(246, 470)).setZ(0.05);
+    this.chin.position.copy(headPoint(176, 350)).setZ(0.05);
     this.headPivot.add(this.chin);
 
     for (const hand of this.hands) {
@@ -377,14 +374,14 @@ export class Opponent {
     const talk = speaking ? 0.35 + 0.65 * Math.abs(Math.sin(time * 15 + Math.sin(time * 4.3) * 2)) : 0;
     const jawOpen = this.jawOpen.update(step, talk);
 
-    this.torso.group.position.set(this.torsoSway, 0.9 + breath * 0.02 - lean * 0.3 + shrug * 0.06, lean * 0.4);
+    this.torso.group.position.set(this.torsoSway, TORSO_TOP + breath * 0.02 - lean * 0.3 + shrug * 0.06, lean * 0.4);
     this.torso.group.scale.setScalar(1 + lean * 0.05);
-    this.mantle.group.position.set(this.torsoSway, 2.3 + breath * 0.028 - lean * 0.3 + shrug * 0.12, 0.02 + lean * 0.4);
-    this.mantle.group.scale.set(1 + lean * 0.05, 1 + lean * 0.05 + breath * 0.008, 1);
+    this.cowl.group.position.set(this.torsoSway, COWL_TOP + breath * 0.028 - lean * 0.3 + shrug * 0.12, 0.02 + lean * 0.4);
+    this.cowl.group.scale.set(1 + lean * 0.05, 1 + lean * 0.05 + breath * 0.008, 1);
 
     this.headPivot.position.set(this.torsoSway, NECK_Y + breath * 0.03 - pitch * 0.7 - lean * 0.4 + shrug * 0.1, 0.2 + lean * 0.6);
     this.headPivot.rotation.z = roll;
-    this.headPivot.scale.setScalar(HEAD_SCALE * (1 + lean * 0.1));
+    this.headPivot.scale.setScalar(1 + lean * 0.1);
 
     this.stage.updateMatrixWorld(true);
     this.updateEyes(step);
@@ -400,7 +397,7 @@ export class Opponent {
   }
 
   private jawBaseY(): number {
-    return HEAD_LIFT + (HEAD_PX.height / 2 - 430) * HEAD_UNIT;
+    return (HEAD_PX.height - 304) * UNIT;
   }
 
   private updateEyes(step: number): void {
@@ -471,11 +468,11 @@ export class Opponent {
       const dx = wrist.x - shoulder.x;
       const dy = wrist.y + 0.15 - shoulder.y;
       const length = Math.hypot(dx, dy);
-      const stretch = THREE.MathUtils.clamp(length / SLEEVE_LENGTH, 0.5, 2.4);
+      const stretch = THREE.MathUtils.clamp(length / SLEEVE_LENGTH, 0.22, 2.4);
 
       const sleeve = this.sleeves[side].group;
       sleeve.position.copy(shoulder);
-      // Behind the fur mantle, so the arms seem to come out from under it.
+      // Behind the cowl, so the arms seem to come out from under it.
       sleeve.position.z = 0.01;
       sleeve.rotation.z = Math.atan2(dx, -dy);
       sleeve.scale.set(THREE.MathUtils.clamp(1 / Math.sqrt(stretch), 0.75, 1.15), stretch, 1);

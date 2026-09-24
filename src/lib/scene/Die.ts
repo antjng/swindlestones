@@ -64,19 +64,20 @@ function createFaceTexture(value: Face, owner: PlayerId): THREE.CanvasTexture {
     x: center.x + (corner.x - center.x) * amount,
     y: center.y + (corner.y - center.y) * amount,
   });
+  // Each layout keeps a pip (and its ring) clear of the triangle's edges.
   const pips =
     value === 1
       ? [center]
       : value === 2
-        ? [toward(corners[0], 0.46), toward(corners[0], -0.46)]
+        ? [{ x: center.x - 36, y: center.y }, { x: center.x + 36, y: center.y }]
         : value === 3
           ? corners.map((c) => toward(c, 0.5))
-          : [center, ...corners.map((c) => toward(c, 0.62))];
+          : [center, ...corners.map((c) => toward(c, 0.58))];
 
-  const radius = value === 1 ? 30 : 23;
+  const radius = { 1: 30, 2: 23, 3: 22, 4: 19 }[value];
   for (const pip of pips) {
     ctx.beginPath();
-    ctx.arc(pip.x, pip.y, radius + 5, 0, Math.PI * 2);
+    ctx.arc(pip.x, pip.y, radius + 4, 0, Math.PI * 2);
     ctx.fillStyle = 'rgba(0,0,0,0.65)';
     ctx.fill();
     ctx.beginPath();

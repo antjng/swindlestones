@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { DEFAULT_AI_CONFIG, decideAiAction } from '../game/ai';
+  import { AiMemory, DEFAULT_AI_CONFIG, decideAiAction } from '../game/ai';
   import { mulberry32, randomSeed } from '../game/rng';
   import { GameStore } from '../state/gameStore.svelte';
   import type { Bid, PlayerId } from '../game/types';
@@ -18,6 +18,8 @@
   const store = new GameStore();
   // Separate from the match RNG so AI bluffing doesn't perturb dice rolls.
   const aiRng = mulberry32(randomSeed());
+  // What the opponent has learned about how you play; it carries across matches.
+  const memory = new AiMemory();
   let diceCanvas: DiceCanvas;
   let busy = $state(false);
 
@@ -72,6 +74,7 @@
   async function resolveCall(by: PlayerId): Promise<void> {
     await diceCanvas.reveal();
     store.call(by);
+    if (by === 'ai' && store.lastCallResult) memory.recordPlayerBidTested(store.lastCallResult.bidWasTrue);
     const opponentLost = store.lastCallResult?.loser === 'ai';
     diceCanvas.setMood(opponentLost ? 'dismayed' : 'smug');
     if (!opponentLost) diceCanvas.speak(1.2);
@@ -89,6 +92,7 @@
       store.diceCounts.player,
       DEFAULT_AI_CONFIG,
       aiRng,
+      memory,
     );
     if (decision.type === 'call') {
       diceCanvas.setMood('calling');
@@ -106,6 +110,7 @@
   async function startRound(): Promise<void> {
     busy = true;
     diceCanvas.setMood('idle');
+    memory.startRound();
     store.startRound();
     await diceCanvas.roll({ player: store.playerHand, ai: store.state.hands.ai });
     busy = false;
@@ -114,12 +119,15 @@
 
   function submitPlayerBid(bid: Bid): void {
     if (!store.isPlayerTurn) return;
+    if (store.currentBid !== null) memory.recordPlayerResponse(false);
+    memory.recordPlayerBid(bid);
     store.submitBid('player', bid);
     void runOpponentTurnIfDue();
   }
 
   async function submitPlayerCall(): Promise<void> {
     if (!store.isPlayerTurn || store.currentBid === null) return;
+    memory.recordPlayerResponse(true);
     busy = true;
     diceCanvas.setMood('tense');
     await resolveCall('player');
