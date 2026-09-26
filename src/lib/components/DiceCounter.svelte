@@ -5,14 +5,16 @@
     color: 'blue' | 'red';
     side: 'left' | 'right';
     label: string;
+    /** Which end of the row the lost dice drop off. */
+    losesFrom?: 'left' | 'right';
   }
 
-  let { count, total, color, side, label }: Props = $props();
+  let { count, total, color, side, label, losesFrom = 'right' }: Props = $props();
 </script>
 
 <div class="counter {side} {color}" role="img" aria-label="{label}: {count} {count === 1 ? 'die' : 'dice'}">
   {#each { length: total } as _, i (i)}
-    <svg viewBox="0 0 32 32" class="gem" class:lost={i >= count}>
+    <svg viewBox="0 0 32 32" class="gem" class:lost={losesFrom === 'left' ? i < total - count : i >= count}>
       <polygon points="16,2 29,16 16,30 3,16" />
       <polyline points="3,16 29,16 M16,2 16,30" />
     </svg>

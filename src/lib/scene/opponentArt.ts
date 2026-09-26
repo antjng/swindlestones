@@ -1,337 +1,186 @@
-import { mulberry32 } from '../game/rng';
-import { INK, closedSpline, createCanvas, fillShape, hatch, line, outlineShape, paperGrain, tracePath } from './ink';
+import { SKIN_PALETTE, lit } from './handArt';
 import type { Pt } from './ink';
+import { blit, blob, dot, noise2, pixelCanvas, pixelCurve, pixelShape, plotLine, shadeLayer } from './pixel';
 
-export const HEAD_PX = { width: 340, height: 440 };
-export const TORSO_PX = { width: 640, height: 520 };
-export const COWL_PX = { width: 640, height: 230 };
-export const SLEEVE_PX = { width: 150, height: 460 };
-export const MOUSTACHE_BOX = { x: 100, y: 246, width: 140, height: 70 };
-export const BEARD_BOX = { x: 84, y: 284, width: 172, height: 140 };
-export const MOUTH_PX = { width: 56, height: 26 };
+// The opponent in low-resolution pixel art, in the manner of a game that keeps
+// its characters in near-total darkness: hooded robes that fade into black,
+// a lined face lit only from below by the table's candles, enormous glowing
+// eyes, grizzled hair. Every part bakes its own lighting into its pixels.
+
+export const HEAD_PX = { width: 300, height: 320 };
+export const TORSO_PX = { width: 620, height: 480 };
+export const COWL_PX = { width: 620, height: 208 };
+export const MOUSTACHE_BOX = { x: 90, y: 190, width: 120, height: 60 };
+export const BEARD_BOX = { x: 70, y: 220, width: 160, height: 140 };
+export const MOUTH_PX = { width: 56, height: 28 };
 
 /** The strip of the head sprite that the animated eyes and brows are drawn over. */
-export const EYES_STRIP = { width: 340, height: 80, top: 158 };
+export const EYES_STRIP = { width: 300, height: 72, top: 96 };
 
-const HABIT_DEEP = '#150f0b';
-const HABIT_LIGHT = '#a08c70';
-const SKIN_LIGHT = '#e6dabe';
-const SKIN_SHADE = '#a89b80';
-const HAIR = '#8f897c';
+const ROBE = ['#020201', '#080604', '#120d08', '#1f160c', '#33240f', '#4d3716'];
+const HAIR = ['#060605', '#171712', '#33332a', '#5f5f4a', '#96967c', '#c9c9a6'];
+const WOOD = ['#120a04', '#2e1c0b', '#5a3a17', '#94622a'];
+const ROPE = '#8a6e3a';
+const ROPE_LIGHT = '#c8a85a';
+const DARK = '#0a0803';
 
+const HEAD_CX = HEAD_PX.width / 2;
 const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
-const mirror = (points: readonly Pt[], axis = 170): Pt[] => points.map(([x, y]) => [2 * axis - x, y]);
 
-function fillGradient(ctx: CanvasRenderingContext2D, shape: readonly Pt[], from: string, to: string, x0: number, x1: number): void {
-  const gradient = ctx.createLinearGradient(x0, 0, x1, 0);
-  gradient.addColorStop(0, from);
-  gradient.addColorStop(1, to);
-  ctx.fillStyle = gradient;
-  tracePath(ctx, shape);
-  ctx.fill();
-}
+const shift = (points: readonly Pt[], dx: number, dy: number): Pt[] => points.map(([x, y]) => [x + dx, y + dy]);
+const mirror = (points: readonly Pt[], axis = HEAD_CX): Pt[] => points.map(([x, y]) => [2 * axis - x, y]);
 
-/** Cloth lit from the upper left: pale ridges on the left of each fold, deep valleys and hatching on the right. */
-function drapeCloth(
-  ctx: CanvasRenderingContext2D,
-  shape: readonly Pt[],
-  rand: () => number,
-  centerX: number,
-  span: number,
-  top: number,
-  bottom: number,
-  folds: number,
-): void {
-  ctx.save();
-  tracePath(ctx, shape);
-  ctx.clip();
-  hatch(ctx, shape, {
-    angle: 1.5,
-    spacing: 5,
-    width: 1.5,
-    shade: (x, y) => clamp01(((x - centerX) / span) * 0.9 + 0.12 + ((y - top) / (bottom - top)) * 0.2),
-    color: HABIT_DEEP,
-  }, rand);
-  hatch(ctx, shape, {
-    angle: 1.5,
-    spacing: 7,
-    width: 1.2,
-    shade: (x) => clamp01(((centerX - x) / span) * 0.7 - 0.1),
-    color: HABIT_LIGHT,
-  }, rand);
-  for (const side of [-1, 1]) {
-    for (let i = 0; i < folds; i++) {
-      const s = (i + 1) / folds;
-      const bend = (i % 2 === 0 ? 1 : -1) * 10;
-      const fold: Pt[] = [
-        [centerX + side * span * 0.1 * s, top],
-        [centerX + side * span * (0.28 + 0.55 * s) + bend, top + (bottom - top) * 0.35],
-        [centerX + side * span * (0.4 + 0.58 * s), top + (bottom - top) * 0.7],
-        [centerX + side * span * (0.44 + 0.6 * s) - bend * 0.5, bottom],
-      ];
-      line(ctx, fold, 3, rand, { color: HABIT_DEEP, taper: 0.9 });
-      line(ctx, fold.map(([x, y]) => [x - side * 4, y] as Pt), 1.6, rand, { color: HABIT_LIGHT, taper: 0.9 });
-    }
-  }
-  ctx.restore();
-}
+/** The head, drawn small: a deep hood, a gaunt face lit from below, and a corded neck. */
+export function drawHead(seed = 11): HTMLCanvasElement {
+  const { width, height } = HEAD_PX;
+  const cx = HEAD_CX;
+  const canvas = pixelCanvas(width, height)[0];
 
-/** Short strokes of hair or fur inside a region, flowing away from a point. */
-function hairStrokes(
-  ctx: CanvasRenderingContext2D,
-  region: readonly Pt[],
-  rand: () => number,
-  count: number,
-  origin: Pt,
-  length: number,
-  colors: readonly string[],
-): void {
-  const xs = region.map((p) => p[0]);
-  const ys = region.map((p) => p[1]);
-  const [x0, x1, y0, y1] = [Math.min(...xs), Math.max(...xs), Math.min(...ys), Math.max(...ys)];
-  ctx.save();
-  tracePath(ctx, region);
-  ctx.clip();
-  for (let i = 0; i < count; i++) {
-    const x = x0 + rand() * (x1 - x0);
-    const y = y0 + rand() * (y1 - y0);
-    const angle = Math.atan2(y - origin[1], x - origin[0]) + (rand() - 0.5) * 0.7;
-    const size = length * (0.6 + rand() * 0.8);
-    line(ctx, [[x, y], [x + Math.cos(angle) * size * 0.5, y + Math.sin(angle) * size * 0.5], [x + Math.cos(angle) * size, y + Math.sin(angle) * size]], 1 + rand() * 1.1, rand, {
-      color: colors[Math.floor(rand() * colors.length)],
-      taper: 0.7,
-    });
-  }
-  ctx.restore();
-}
+  const neck = shadeLayer(width, height, (ctx) => pixelShape(ctx, [[cx - 48, 236], [cx - 52, 290], [cx - 72, 320], [cx + 72, 320], [cx + 52, 290], [cx + 48, 236]], '#000', 3), {
+    palette: SKIN_PALETTE,
+    shade: (x, y) => 0.05 + 0.28 * clamp01((y - 250) / 70) + (noise2(x, y, 6, seed) - 0.5) * 0.18 - 0.1 * clamp01((cx - x) / 50),
+  });
+  blit(canvas, neck);
 
-/** A bald, weathered head with a fringe of grey hair, ears and a lined face, on a corded neck. */
-export function drawHead(): HTMLCanvasElement {
-  const [canvas, ctx] = createCanvas(HEAD_PX.width, HEAD_PX.height);
-  const rand = mulberry32(11);
+  const hood = shadeLayer(width, height, (ctx) => pixelShape(ctx, [
+    [cx - 126, 320], [cx - 130, 200], [cx - 110, 100], [cx - 64, 34], [cx, 10], [cx + 64, 34], [cx + 110, 100], [cx + 130, 200], [cx + 126, 320],
+  ], '#000', 5), {
+    palette: ROBE,
+    shade: (x, y, edge) => 0.07 + 0.28 * clamp01((y - 170) / 150) + (noise2(x, y, 14, seed) - 0.5) * 0.12 + (edge && y > 190 ? 0.16 : 0),
+  });
+  blit(canvas, hood);
 
-  // Neck
-  const neck = closedSpline([[124, 296], [118, 372], [106, 440], [234, 440], [222, 372], [216, 296]]);
-  fillGradient(ctx, neck, '#d9cdb0', '#8f8368', 106, 234);
-  hatch(ctx, neck, {
-    angle: 1.3,
-    spacing: 4,
-    width: 1.4,
-    shade: (x, y) => clamp01((x - 150) / 70) * 0.8 + clamp01((350 - y) / 40) * 0.9,
-  }, rand);
-  line(ctx, [[130, 330], [148, 380], [162, 430]], 2, rand, { taper: 0.9 });
-  line(ctx, [[210, 330], [192, 380], [178, 430]], 2, rand, { taper: 0.9 });
-  outlineShape(ctx, neck, 2.4, rand);
-
-  // The fringe of hair at each side, behind the ears.
-  const hairLeft = closedSpline([[94, 172], [70, 190], [60, 232], [70, 280], [92, 304], [104, 288], [90, 240], [92, 200]]);
-  for (const shape of [hairLeft, mirror(hairLeft)]) {
-    fillShape(ctx, shape, HAIR);
-    hairStrokes(ctx, shape, rand, 70, [170, 110], 14, ['#d6d1c4', '#5b564b', '#aaa497', '#3f3b33']);
-    outlineShape(ctx, shape, 2, rand);
-  }
-
-  // Ears
-  const ear = closedSpline([[86, 196], [70, 190], [60, 214], [68, 250], [88, 256]]);
-  for (const shape of [ear, mirror(ear)]) {
-    fillGradient(ctx, shape, '#dcd0b3', '#a3977c', 56, 90);
-    outlineShape(ctx, shape, 2, rand);
-  }
-  line(ctx, [[80, 200], [70, 206], [70, 232], [80, 244]], 1.6, rand);
-  line(ctx, mirror([[80, 200], [70, 206], [70, 232], [80, 244]]), 1.6, rand);
-
-  // Face, lit from the left.
-  const face = closedSpline([
-    [170, 76], [122, 92], [88, 146], [78, 214], [90, 274], [124, 322], [170, 348], [216, 322], [250, 274], [262, 214], [252, 146], [218, 92],
-  ]);
-  fillGradient(ctx, face, SKIN_LIGHT, SKIN_SHADE, 78, 262);
-  hatch(ctx, face, {
-    angle: 1.3,
-    spacing: 3.6,
-    width: 1.3,
-    shade: (x, y) => {
-      const right = clamp01((x - 178) / 70) * 0.75;
-      const edge = clamp01((Math.abs(x - 170) - 66) / 22) * 0.8;
-      const brow = clamp01((176 - y) / 12) * clamp01((y - 160) / 6);
-      const socket = Math.max(0, 0.85 - Math.hypot(x - 136, y - 192) / 26) + Math.max(0, 0.85 - Math.hypot(x - 204, y - 192) / 26);
-      const cheek = Math.max(0, 0.8 - Math.hypot(x - 116, y - 272) / 22) + Math.max(0, 0.8 - Math.hypot(x - 224, y - 272) / 22);
-      const jaw = clamp01((y - 318) / 26);
-      return clamp01(right + edge + brow + socket + cheek + jaw);
+  const face = shadeLayer(width, height, (ctx) => pixelShape(ctx, [
+    [cx, 40], [cx + 62, 60], [cx + 82, 118], [cx + 80, 186], [cx + 52, 240], [cx + 8, 264], [cx - 30, 258], [cx - 56, 236], [cx - 78, 188], [cx - 84, 120], [cx - 64, 60],
+  ], '#000', 5), {
+    palette: SKIN_PALETTE,
+    shade: (x, y, edge) => {
+      const nx = (x - cx) / 86;
+      const ny = (y - 150) / 116;
+      const nz = Math.sqrt(Math.max(0.05, 1 - nx * nx - ny * ny));
+      let v = 0.08 + 0.9 * lit(nx, ny, nz);
+      // The nose catches light on its underside; the eye sockets, brow and cheek hollows fall into shadow.
+      v += 0.3 * blob(x, y, cx + 4, 206, 15) - 0.22 * blob(x, y, cx - 24, 172, 16);
+      v *= 1 - 0.8 * Math.max(blob(x, y, cx - 44, 132, 30), blob(x, y, cx + 44, 132, 30));
+      v *= 1 - 0.55 * clamp01(1 - Math.abs(y - 106) / 15) * clamp01((92 - Math.abs(x - cx)) / 40);
+      v *= 1 - 0.45 * Math.max(blob(x, y, cx - 58, 198, 27), blob(x, y, cx + 58, 198, 27));
+      v *= 0.5 + 0.5 * clamp01((y - 46) / 140);
+      v += (noise2(x, y, 7, seed) - 0.5) * 0.22 + (noise2(x, y, 3, seed + 4) - 0.5) * 0.1;
+      if (edge) v += x < cx || y > 220 ? 0.18 : -0.08;
+      return v;
     },
-  }, rand);
-  hatch(ctx, face, {
-    angle: 0.4,
-    spacing: 4.6,
-    width: 1.1,
-    shade: (x, y) => clamp01((Math.abs(x - 170) - 52) / 26) * clamp01((y - 200) / 60) * 0.9 + clamp01((y - 326) / 18),
-  }, rand);
+  });
+  blit(canvas, face);
 
-  // Forehead: the shine of a bald crown, creases across the brow, and a frown line.
-  line(ctx, [[126, 100], [170, 88], [214, 100]], 1.2, rand, { taper: 0.9, color: '#b6a98c' });
-  for (let i = 0; i < 3; i++) line(ctx, [[130, 122 + i * 14], [170, 116 + i * 14], [210, 122 + i * 14]], 1.5, rand, { taper: 0.8 });
-  line(ctx, [[160, 168], [158, 182]], 1.8, rand, { taper: 0.9 });
-  line(ctx, [[180, 168], [182, 182]], 1.8, rand, { taper: 0.9 });
-  // Around the eyes: the creased upper lid, bags, crow's feet
-  for (const cx of [136, 204]) {
-    const side = cx < 170 ? -1 : 1;
-    line(ctx, [[cx - 20, 184], [cx, 176], [cx + 20, 184]], 1.6, rand, { color: '#7a6d56' });
-    line(ctx, [[cx - 17, 208], [cx, 216], [cx + 17, 208]], 1.6, rand);
-    line(ctx, [[cx - 13, 218], [cx, 224], [cx + 15, 218]], 1.2, rand, { color: '#7a6d56' });
-    for (let i = 0; i < 3; i++) line(ctx, [[cx + side * 21, 192 + i * 5], [cx + side * (31 + i), 188 + i * 9]], 1.2, rand, { taper: 0.9 });
-  }
-  // Cheekbones, nose, and the lines running from nose to mouth
-  line(ctx, [[104, 236], [118, 256], [138, 262]], 1.8, rand, { taper: 0.9 });
-  line(ctx, mirror([[104, 236], [118, 256], [138, 262]]), 1.8, rand, { taper: 0.9 });
-  line(ctx, [[163, 190], [160, 226], [154, 254]], 2, rand);
-  line(ctx, [[176, 196], [180, 232], [186, 254]], 1.5, rand, { taper: 0.9 });
-  line(ctx, [[146, 262], [152, 270], [170, 274], [188, 270], [194, 262]], 1.8, rand);
-  line(ctx, [[150, 248], [144, 260], [151, 270]], 1.6, rand);
-  line(ctx, [[190, 248], [196, 260], [189, 270]], 1.6, rand);
-  fillShape(ctx, closedSpline([[154, 266], [160, 263], [166, 267], [160, 270]]), INK);
-  fillShape(ctx, closedSpline([[174, 267], [180, 263], [186, 266], [180, 270]]), INK);
-  line(ctx, [[148, 272], [136, 296], [130, 320]], 1.8, rand, { taper: 0.9 });
-  line(ctx, [[192, 272], [204, 296], [210, 320]], 1.8, rand, { taper: 0.9 });
-  outlineShape(ctx, face, 2.2, rand);
-
-  // The collar of the habit, cut in a V.
-  const collar = closedSpline([[92, 440], [100, 402], [138, 396], [170, 428], [202, 396], [240, 402], [248, 440]]);
-  fillGradient(ctx, collar, '#4a3a2d', '#1c140f', 92, 248);
-  hatch(ctx, collar, { angle: 1.2, spacing: 5, width: 1.4, shade: (x) => clamp01((x - 150) / 90) * 0.9, color: HABIT_DEEP }, rand);
-  line(ctx, [[138, 398], [170, 430], [202, 398]], 2.4, rand, { color: HABIT_LIGHT });
-  outlineShape(ctx, collar, 2.2, rand);
-
-  paperGrain(ctx, HEAD_PX.width, HEAD_PX.height, rand);
+  const ctx = canvas.getContext('2d')!;
+  for (let i = 0; i < 3; i++) pixelCurve(ctx, [[cx - 42, 70 + i * 13], [cx, 64 + i * 13], [cx + 42, 70 + i * 13]], DARK);
+  pixelCurve(ctx, [[cx - 10, 150], [cx - 16, 184], [cx - 20, 202]], DARK);
+  dot(ctx, cx - 9, 210, '#050402', 2);
+  dot(ctx, cx + 9, 210, '#050402', 2);
+  pixelCurve(ctx, [[cx - 26, 200], [cx - 36, 226], [cx - 38, 250]], DARK);
+  pixelCurve(ctx, [[cx + 26, 200], [cx + 36, 226], [cx + 34, 246]], DARK);
+  pixelCurve(ctx, [[cx - 66, 168], [cx - 56, 190], [cx - 44, 198]], '#1c1608');
+  pixelCurve(ctx, [[cx + 66, 168], [cx + 56, 190], [cx + 44, 198]], '#1c1608');
+  pixelCurve(ctx, [[cx - 20, 268], [cx, 262], [cx + 22, 268]], DARK);
   return canvas;
+}
+
+function boxLayer(
+  box: { x: number; y: number; width: number; height: number },
+  masks: readonly (readonly Pt[])[],
+  samples: number,
+  shade: (x: number, y: number, edge: number) => number,
+): HTMLCanvasElement {
+  return shadeLayer(box.width, box.height, (ctx) => masks.forEach((points) => pixelShape(ctx, shift(points, -box.x, -box.y), '#000', samples)), {
+    palette: HAIR,
+    shade: (x, y, edge) => shade(x + box.x, y + box.y, edge),
+  });
 }
 
 /** The moustache, drawn in head coordinates and cropped to MOUSTACHE_BOX. */
-export function drawMoustache(): HTMLCanvasElement {
-  const [canvas, ctx] = createCanvas(MOUSTACHE_BOX.width, MOUSTACHE_BOX.height);
-  ctx.translate(-MOUSTACHE_BOX.x, -MOUSTACHE_BOX.y);
-  const rand = mulberry32(31);
-
-  const lobe: Pt[] = closedSpline([[171, 266], [186, 259], [206, 261], [222, 272], [224, 292], [212, 285], [192, 280], [172, 279]]);
-  for (const [shape, from, to] of [[lobe, '#d7d2c4', '#a7a293'], [mirror(lobe), '#c9c4b5', '#8d887a']] as const) {
-    fillGradient(ctx, shape, from, to, 100, 240);
-    hairStrokes(ctx, shape, rand, 30, [170, 266], 11, ['#efeadc', '#6b665a', '#3e3a32']);
-    outlineShape(ctx, shape, 1.8, rand);
-  }
-  return canvas;
+export function drawMoustache(seed = 31): HTMLCanvasElement {
+  const cx = HEAD_CX;
+  const lobe: Pt[] = [[cx, 202], [cx + 18, 196], [cx + 40, 203], [cx + 56, 224], [cx + 50, 240], [cx + 30, 231], [cx + 12, 223]];
+  return boxLayer(MOUSTACHE_BOX, [lobe, mirror(lobe)], 4, (x, y, edge) => {
+    const strand = noise2(x, y * 0.3, 4, seed);
+    return 0.22 + 0.4 * strand + 0.35 * clamp01((y - 208) / 30) + (edge ? 0.12 : 0) - 0.15 * clamp01((x - cx) / 60);
+  });
 }
 
-/** A short, spade-shaped beard. Drawn in head coordinates and cropped to BEARD_BOX. */
-export function drawBeard(): HTMLCanvasElement {
-  const [canvas, ctx] = createCanvas(BEARD_BOX.width, BEARD_BOX.height);
-  ctx.translate(-BEARD_BOX.x, -BEARD_BOX.y);
-  const rand = mulberry32(43);
-
-  const beard = closedSpline([
-    [112, 294], [106, 326], [118, 362], [144, 390], [170, 412], [196, 390], [222, 362], [234, 326], [228, 294], [210, 312], [170, 320], [130, 312],
-  ]);
-  fillGradient(ctx, beard, '#cfcabb', '#807b6d', 94, 246);
-  hairStrokes(ctx, beard, rand, 260, [170, 300], 15, ['#f0ebdc', '#a9a496', '#4e4a40', '#dcd7c8']);
-  hatch(ctx, beard, {
-    angle: 1.5,
-    spacing: 5,
-    width: 1.2,
-    shade: (x, y) => clamp01((x - 176) / 60) * 0.7 + clamp01((y - 395) / 20) * 0.4,
-    color: '#2c2820',
-  }, rand);
-  outlineShape(ctx, beard, 1.6, rand);
-  return canvas;
+/** A ragged grey beard. Drawn in head coordinates and cropped to BEARD_BOX. */
+export function drawBeard(seed = 43): HTMLCanvasElement {
+  const cx = HEAD_CX;
+  const beard: Pt[] = [
+    [cx - 64, 224], [cx - 70, 262], [cx - 58, 300], [cx - 46, 330], [cx - 30, 352], [cx - 18, 338], [cx - 6, 360], [cx + 8, 340], [cx + 22, 356],
+    [cx + 34, 334], [cx + 50, 318], [cx + 62, 286], [cx + 68, 256], [cx + 62, 224], [cx + 34, 242], [cx, 248], [cx - 34, 242],
+  ];
+  return boxLayer(BEARD_BOX, [beard], 3, (x, y, edge) => {
+    const strand = noise2(x, y * 0.22, 5, seed);
+    const fine = noise2(x, y * 0.5, 2, seed + 8);
+    return 0.16 + 0.34 * strand + 0.16 * fine + 0.24 * clamp01(1 - Math.abs(y - 282) / 70) - 0.24 * clamp01((x - cx - 18) / 50) + (edge ? 0.1 : 0);
+  });
 }
 
 /** The dark inside of the mouth, shown when the jaw drops. */
 export function drawMouth(): HTMLCanvasElement {
-  const [canvas, ctx] = createCanvas(MOUTH_PX.width, MOUTH_PX.height);
-  const rand = mulberry32(59);
-  fillShape(ctx, closedSpline([[4, 10], [28, 3], [52, 10], [48, 20], [28, 25], [8, 20]]), '#0b0605');
-  for (let i = 0; i < 5; i++) {
-    const x = 14 + i * 6.4;
-    fillShape(ctx, closedSpline([[x - 2.4, 6], [x + 2.4, 6], [x + 1.8, 12], [x - 1.8, 12]]), '#d3c8ae');
-  }
-  line(ctx, [[10, 20], [28, 24], [46, 20]], 1.6, rand, { color: '#5a2a24' });
+  const [canvas, ctx] = pixelCanvas(MOUTH_PX.width, MOUTH_PX.height);
+  pixelShape(ctx, [[4, 10], [28, 3], [52, 10], [48, 22], [28, 27], [8, 22]], '#050302', 3);
+  for (let i = 0; i < 5; i++) dot(ctx, 14 + i * 7, 8, '#c9c9a6', 1);
+  for (let i = 0; i < 4; i++) dot(ctx, 17 + i * 7, 22, '#96967c', 1);
+  dot(ctx, 24, 15, '#3a0f0a', 2);
   return canvas;
 }
 
-/** The habit's shoulders and chest, with a scapular, a wooden cross on a cord, and a bunched cowl. */
-export function drawTorso(): HTMLCanvasElement {
-  const [canvas, ctx] = createCanvas(TORSO_PX.width, TORSO_PX.height);
-  const rand = mulberry32(23);
+/** The habit: a black bell of cloth fading upward into shadow, a scapular, a rope cinch and a wooden cross. */
+export function drawTorso(seed = 23): HTMLCanvasElement {
+  const { width, height } = TORSO_PX;
+  const cx = width / 2;
+  const canvas = pixelCanvas(width, height)[0];
 
-  const habit = closedSpline([
-    [290, 14], [350, 14], [432, 40], [522, 82], [590, 152], [622, 300], [632, 520], [8, 520], [18, 300], [50, 152], [118, 82], [208, 40],
-  ]);
-  fillGradient(ctx, habit, '#4d3d30', '#150f0b', 30, 630);
-  drapeCloth(ctx, habit, rand, 320, 300, 80, 510, 6);
-  line(ctx, [[208, 42], [120, 84], [52, 154], [20, 300], [10, 510]], 3.2, rand, { color: HABIT_LIGHT, taper: 0.8 });
+  const folds = (x: number, y: number) => 0.13 * Math.sin(x * 0.045 + noise2(x, y, 70, seed) * 5) * clamp01((y - 60) / 120);
+  const robe = shadeLayer(width, height, (ctx) => pixelShape(ctx, [
+    [cx - 40, 14], [cx + 40, 14], [cx + 130, 60], [cx + 224, 160], [cx + 268, 300], [cx + 288, 470], [cx - 288, 470], [cx - 268, 300], [cx - 224, 160], [cx - 130, 60],
+  ], '#000', 6), {
+    palette: ROBE,
+    shade: (x, y, edge) => 0.05 + 0.34 * clamp01((y - 180) / 290) + folds(x, y) + (noise2(x, y, 10, seed) - 0.5) * 0.1 + (edge ? (x < cx ? 0.22 : 0.05) : 0),
+  });
+  blit(canvas, robe);
 
-  // The scapular hangs down the front, over the habit.
-  const scapular = closedSpline([[244, 30], [396, 30], [412, 200], [420, 520], [220, 520], [228, 200]]);
-  fillGradient(ctx, scapular, '#3a2d23', '#1a130e', 220, 420);
-  hatch(ctx, scapular, { angle: 1.55, spacing: 5, width: 1.3, shade: (x) => clamp01((x - 300) / 110) * 0.9, color: HABIT_DEEP }, rand);
-  for (const dx of [-38, 0, 40]) line(ctx, [[320 + dx, 40], [320 + dx * 1.2, 260], [320 + dx * 1.3, 510]], 2.2, rand, { color: HABIT_DEEP, taper: 0.9 });
-  line(ctx, [[248, 34], [232, 200], [224, 510]], 2.2, rand, { color: HABIT_LIGHT, taper: 0.8 });
-  outlineShape(ctx, scapular, 1.8, rand);
+  const scapular = shadeLayer(width, height, (ctx) => pixelShape(ctx, [[cx - 66, 20], [cx + 66, 20], [cx + 80, 200], [cx + 88, 470], [cx - 88, 470], [cx - 80, 200]], '#000', 3), {
+    palette: ROBE,
+    shade: (x, y, edge) => 0.03 + 0.24 * clamp01((y - 220) / 250) + (noise2(x, y, 8, seed + 2) - 0.5) * 0.09 + (edge && x < cx ? 0.14 : 0),
+  });
+  blit(canvas, scapular);
 
-  // A wooden cross on a cord.
-  line(ctx, [[262, 44], [286, 150], [320, 196]], 2, rand, { color: '#c9b892' });
-  line(ctx, [[378, 44], [354, 150], [320, 196]], 2, rand, { color: '#c9b892' });
-  fillShape(ctx, closedSpline([[312, 190], [328, 190], [328, 214], [346, 214], [346, 228], [328, 228], [328, 256], [312, 256], [312, 228], [294, 228], [294, 214], [312, 214]], 3), '#7b5836');
-  line(ctx, [[319, 194], [319, 252]], 1.2, rand, { color: '#3d2a18' });
-  line(ctx, [[298, 221], [342, 221]], 1.2, rand, { color: '#3d2a18' });
-  line(ctx, [[313, 194], [313, 226], [298, 226]], 1.6, rand, { color: '#c49a62' });
+  const ctx = canvas.getContext('2d')!;
+  pixelCurve(ctx, [[cx - 190, 300], [cx - 60, 322], [cx + 60, 318], [cx + 200, 296]], ROPE, 2);
+  pixelCurve(ctx, [[cx - 190, 296], [cx - 60, 318], [cx + 60, 314], [cx + 200, 292]], ROPE_LIGHT, 1);
+  pixelCurve(ctx, [[cx - 46, 30], [cx - 18, 140], [cx, 176]], ROPE);
+  pixelCurve(ctx, [[cx + 46, 30], [cx + 18, 140], [cx, 176]], ROPE);
 
-  outlineShape(ctx, habit, 2.4, rand);
-  paperGrain(ctx, TORSO_PX.width, TORSO_PX.height, rand);
+  const cross = shadeLayer(width, height, (c) => {
+    pixelShape(c, [[cx - 8, 172], [cx + 8, 172], [cx + 8, 240], [cx - 8, 240]], '#000', 1);
+    pixelShape(c, [[cx - 26, 196], [cx + 26, 196], [cx + 26, 212], [cx - 26, 212]], '#000', 1);
+  }, {
+    palette: WOOD,
+    shade: (x, y, edge) => 0.42 + 0.3 * clamp01((y - 172) / 68) - 0.18 * clamp01((x - cx) / 20) + (noise2(x, y, 4, seed + 6) - 0.5) * 0.3 - (edge ? 0.12 : 0),
+  });
+  blit(canvas, cross);
   return canvas;
 }
 
-/** The hood, bunched into a thick roll around the neck and over the shoulders. */
-export function drawCowl(): HTMLCanvasElement {
-  const [canvas, ctx] = createCanvas(COWL_PX.width, COWL_PX.height);
-  const rand = mulberry32(71);
-
-  const cowl = closedSpline([
-    [50, 206], [104, 112], [206, 52], [320, 30], [434, 52], [536, 112], [590, 206], [488, 196], [412, 146], [320, 128], [228, 146], [152, 196],
-  ]);
-  fillGradient(ctx, cowl, '#5a4838', '#1a130e', 50, 590);
-  ctx.save();
-  tracePath(ctx, cowl);
-  ctx.clip();
-  // Folds following the curve of the roll.
-  for (let i = 0; i < 5; i++) {
-    const inset = i * 16;
-    line(ctx, [[86 + inset, 200 - inset * 0.3], [210 + inset * 0.6, 62 + inset * 0.7], [320, 40 + inset * 0.9], [430 - inset * 0.6, 62 + inset * 0.7], [554 - inset, 200 - inset * 0.3]], 2.4, rand, {
-      color: i % 2 ? HABIT_DEEP : HABIT_LIGHT,
-      taper: 0.6,
-    });
-  }
-  hatch(ctx, cowl, { angle: 0.4, spacing: 6, width: 1.3, shade: (x, y) => clamp01((x - 320) / 260) * 0.7 + clamp01((y - 150) / 60) * 0.6, color: HABIT_DEEP }, rand);
-  ctx.restore();
-  outlineShape(ctx, cowl, 2.4, rand);
-  paperGrain(ctx, COWL_PX.width, COWL_PX.height, rand);
-  return canvas;
-}
-
-/** A wide habit sleeve with a dark opening at the cuff; stretched to reach the hand. */
-export function drawSleeve(): HTMLCanvasElement {
-  const [canvas, ctx] = createCanvas(SLEEVE_PX.width, SLEEVE_PX.height);
-  const rand = mulberry32(37);
-
-  const sleeve = closedSpline([
-    [30, 44], [75, 16], [120, 44], [128, 180], [140, 330], [148, 428], [75, 440], [2, 428], [10, 330], [22, 180],
-  ]);
-  fillGradient(ctx, sleeve, '#4d3d30', '#150f0b', 10, 140);
-  drapeCloth(ctx, sleeve, rand, 75, 70, 40, 430, 3);
-  line(ctx, [[30, 46], [22, 180], [10, 330], [4, 426]], 2.6, rand, { color: HABIT_LIGHT, taper: 0.8 });
-  outlineShape(ctx, sleeve, 2.2, rand);
-
-  const opening = closedSpline([[8, 424], [75, 412], [144, 424], [132, 446], [75, 454], [20, 446]]);
-  fillShape(ctx, opening, '#0d0806');
-  line(ctx, [[10, 428], [75, 416], [142, 428]], 2, rand, { color: HABIT_LIGHT, taper: 0.7 });
-  outlineShape(ctx, opening, 1.8, rand);
-  paperGrain(ctx, SLEEVE_PX.width, SLEEVE_PX.height, rand);
+/** The hood, bunched into a thick roll over the shoulders. */
+export function drawCowl(seed = 71): HTMLCanvasElement {
+  const { width, height } = COWL_PX;
+  const cx = width / 2;
+  const canvas = shadeLayer(width, height, (ctx) => pixelShape(ctx, [
+    [cx - 280, 188], [cx - 240, 100], [cx - 130, 40], [cx, 22], [cx + 130, 40], [cx + 240, 100], [cx + 280, 188], [cx + 190, 180], [cx + 90, 130], [cx, 112], [cx - 90, 130], [cx - 190, 180],
+  ], '#000', 5), {
+    palette: ROBE,
+    shade: (x, y, edge) => 0.06 + 0.18 * clamp01((y - 60) / 130) + 0.1 * Math.sin(x * 0.05 + noise2(x, y, 50, seed) * 4) + (noise2(x, y, 9, seed) - 0.5) * 0.1 + (edge ? (y < 110 ? 0.2 : 0.06) : 0),
+  });
+  const ctx = canvas.getContext('2d')!;
+  pixelShape(ctx, [[cx - 90, 130], [cx, 112], [cx + 90, 130], [cx + 40, 152], [cx, 146], [cx - 40, 152]], '#010100', 3);
   return canvas;
 }
 
@@ -347,61 +196,55 @@ export interface EyeState {
   gazeY: number;
 }
 
-/** Draws the eyes and brows into a strip that overlays the head sprite. */
+function fillEllipse(ctx: CanvasRenderingContext2D, cx: number, cy: number, rx: number, ry: number, color: string): void {
+  ctx.fillStyle = color;
+  const [x0, x1] = [Math.floor((cx - rx) / 4), Math.ceil((cx + rx) / 4)];
+  const [y0, y1] = [Math.floor((cy - ry) / 4), Math.ceil((cy + ry) / 4)];
+  for (let py = y0; py <= y1; py++) {
+    for (let px = x0; px <= x1; px++) {
+      const dx = (px * 4 + 2 - cx) / rx;
+      const dy = (py * 4 + 2 - cy) / ry;
+      if (dx * dx + dy * dy <= 1) ctx.fillRect(px, py, 1, 1);
+    }
+  }
+}
+
+/** Draws huge, pale, glowing eyes with tiny pupils, heavy lids, and brows. */
 export function drawEyes(ctx: CanvasRenderingContext2D, state: EyeState): void {
-  const rand = mulberry32(67);
-  ctx.clearRect(0, 0, EYES_STRIP.width, EYES_STRIP.height);
+  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  const cx = EYES_STRIP.width / 2;
 
   for (const side of [-1, 1] as const) {
-    const cx = 170 + side * 34;
-    const cy = 32;
-    const open = Math.max(state.open, 0.04);
-    const upper = 11 * open;
-    const lower = 5 * Math.min(open, 1);
+    const ex = cx + side * 44;
+    const ey = 36;
+    const open = Math.max(state.open, 0.06);
+    const halfH = 15 * Math.min(open, 1.25);
 
-    ctx.beginPath();
-    ctx.moveTo(cx - 17, cy + 2);
-    ctx.quadraticCurveTo(cx, cy + 2 - upper * 1.6, cx + 17, cy + 2);
-    ctx.quadraticCurveTo(cx, cy + 2 + lower * 1.5, cx - 17, cy + 2);
-    ctx.closePath();
-    ctx.fillStyle = '#f0ead8';
-    ctx.fill();
-    ctx.save();
-    ctx.clip();
-    const ix = cx + state.gazeX * 5;
-    const iy = cy + 2 + state.gazeY * 2.5;
-    ctx.fillStyle = '#5b4e3a';
-    ctx.beginPath();
-    ctx.arc(ix, iy, 7.4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = INK;
-    ctx.beginPath();
-    ctx.arc(ix, iy, 3.4, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = '#f0ead8';
-    ctx.beginPath();
-    ctx.arc(ix - 2, iy - 2.4, 1.3, 0, Math.PI * 2);
-    ctx.fill();
-    // The upper lid shadows the top of the eye.
-    ctx.fillStyle = 'rgba(40,28,16,0.35)';
-    ctx.fillRect(cx - 20, cy - 12, 40, 9 + (1 - Math.min(open, 1)) * 6);
-    ctx.restore();
+    fillEllipse(ctx, ex, ey, 26, halfH + 5, '#3d4a12');
+    fillEllipse(ctx, ex, ey, 22, halfH, '#e8e6b4');
+    fillEllipse(ctx, ex, ey, 12, Math.max(2, halfH - 5), '#fbf8d8');
 
-    line(ctx, [[cx - 19, cy + 2], [cx - 4, cy + 2 - upper * 1.5], [cx + 19, cy + 3]], 2.8, rand, { taper: 0.5 });
-    line(ctx, [[cx - 14, cy + 4], [cx, cy + 4 + lower * 1.4], [cx + 15, cy + 4]], 1.1, rand, { taper: 0.8 });
+    const px = ex + state.gazeX * 8 - 4;
+    const py = ey + state.gazeY * 4 - 4;
+    ctx.fillStyle = '#050402';
+    ctx.fillRect(Math.floor(px / 4), Math.floor(py / 4), 2, 2);
+
+    // Heavy upper lid, slanted by the brow.
+    const innerDrop = state.browTilt * 7;
+    const lidY = ey - halfH * 0.42;
+    ctx.fillStyle = '#0d0a04';
+    for (let dx = -28; dx <= 28; dx += 4) {
+      const inner = side === 1 ? -dx : dx;
+      const y = lidY + Math.max(0, inner / 28) * innerDrop * 0.8 - 1;
+      const bottom = Math.floor(y / 4);
+      for (let row = Math.floor((ey - halfH - 8) / 4); row <= bottom; row++) ctx.fillRect(Math.floor((ex + dx) / 4), row, 1, 1);
+    }
 
     const asym = side === 1 ? state.browAsym : 0;
-    const lift = (state.browRaise + asym) * 8;
-    const innerDrop = state.browTilt * 7;
-    const outer: Pt = [170 + side * 62, 13 - lift - innerDrop * 0.3];
-    const middle: Pt = [170 + side * 38, 5 - lift - 2];
-    const inner: Pt = [170 + side * 11, 10 - lift + innerDrop];
-    line(ctx, [outer, middle, inner], 6, rand, { color: '#4f483c', taper: 0.6, wobble: 0.4 });
-    for (let i = 0; i < 12; i++) {
-      const t = i / 11;
-      const x = outer[0] + (inner[0] - outer[0]) * t;
-      const y = outer[1] + (inner[1] - outer[1]) * t - Math.sin(t * Math.PI) * 6;
-      line(ctx, [[x, y + 3], [x - side * 3, y - 6 - rand() * 3]], 1.1, rand, { color: i % 2 ? '#8f887a' : INK, taper: 0.5 });
-    }
+    const lift = (state.browRaise + asym) * 9;
+    const outer: Pt = [ex + side * 26, ey - 22 - lift - innerDrop * 0.3];
+    const inner: Pt = [ex - side * 22, ey - 16 - lift + innerDrop];
+    plotLine(ctx, outer, inner, '#0d0a04', 2);
+    plotLine(ctx, [outer[0], outer[1] - 4], [inner[0], inner[1] - 4], '#5f5f4a', 1);
   }
 }

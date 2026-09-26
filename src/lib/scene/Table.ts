@@ -1,130 +1,49 @@
 import * as THREE from 'three';
+import { WOOD_PALETTE, pixelSurface, pixelWood } from './surfaces';
 
-const TABLE_HALF_WIDTH = 9;
-const TABLE_HALF_DEPTH = 3.6;
+const TABLE_HALF_WIDTH = 10;
+/** The table runs from just behind the monk's side to well in front of your dice. */
+const TABLE_BACK = -3.6;
+const TABLE_FRONT = 6.4;
+const TABLE_DEPTH = TABLE_FRONT - TABLE_BACK;
+const TABLE_CENTER_Z = (TABLE_FRONT + TABLE_BACK) / 2;
 
 const TABLE_TOP = 0;
 
 const BODY_DEPTH = 4;
 
-function makeCanvas(width: number, height: number): [HTMLCanvasElement, CanvasRenderingContext2D] {
-  const canvas = document.createElement('canvas');
-  canvas.width = width;
-  canvas.height = height;
-  return [canvas, canvas.getContext('2d')!];
-}
-
-function weatheredWood(): THREE.CanvasTexture {
-  const [canvas, ctx] = makeCanvas(2048, 512);
-  ctx.fillStyle = '#5a5046';
-  ctx.fillRect(0, 0, 2048, 512);
-
-  const planks = 5;
-  const plankHeight = 512 / planks;
-  for (let p = 0; p < planks; p++) {
-    const top = p * plankHeight;
-    ctx.fillStyle = `rgba(${Math.random() < 0.5 ? '0,0,0' : '150,130,105'},${0.05 + Math.random() * 0.1})`;
-    ctx.fillRect(0, top, 2048, plankHeight);
-
-    for (let g = 0; g < 90; g++) {
-      const y = top + Math.random() * plankHeight;
-      ctx.strokeStyle = Math.random() < 0.6 ? 'rgba(20,14,8,0.4)' : 'rgba(170,150,125,0.22)';
-      ctx.lineWidth = 0.6 + Math.random() * 1.6;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      for (let x = 0; x <= 2048; x += 64) {
-        ctx.lineTo(x, y + Math.sin(x * 0.008 + g * 1.7) * 4 + (Math.random() - 0.5) * 2);
-      }
-      ctx.stroke();
-    }
-    for (let k = 0; k < 2; k++) {
-      const x = Math.random() * 2048;
-      const y = top + plankHeight * (0.25 + Math.random() * 0.5);
-      ctx.strokeStyle = 'rgba(15,10,6,0.55)';
-      for (let r = 4; r < 20; r += 4) {
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        ctx.ellipse(x, y, r * 2.2, r, 0, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    }
-    ctx.fillStyle = '#0d0905';
-    ctx.fillRect(0, top, 2048, 5);
-  }
-
-  for (let i = 0; i < 24; i++) {
-    const x = Math.random() * 2048;
-    const y = Math.random() * 512;
-    const radius = 40 + Math.random() * 140;
-    const stain = ctx.createRadialGradient(x, y, 0, x, y, radius);
-    stain.addColorStop(0, 'rgba(15,10,6,0.4)');
-    stain.addColorStop(0.8, 'rgba(15,10,6,0.12)');
-    stain.addColorStop(1, 'rgba(15,10,6,0)');
-    ctx.fillStyle = stain;
-    ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
-  }
-
-  ctx.strokeStyle = '#0a0705';
-  for (let i = 0; i < 14; i++) {
-    let x = Math.random() * 2048;
-    let y = Math.random() * 512;
-    ctx.lineWidth = 2 + Math.random() * 3;
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    const heading = Math.random() * Math.PI * 2;
-    for (let s = 0; s < 16; s++) {
-      x += Math.cos(heading + (Math.random() - 0.5) * 1.2) * (16 + Math.random() * 34);
-      y += Math.sin(heading + (Math.random() - 0.5) * 1.2) * (16 + Math.random() * 34);
-      ctx.lineTo(x, y);
-    }
-    ctx.stroke();
-  }
-
-  for (let i = 0; i < 120; i++) {
-    ctx.strokeStyle = `rgba(200,180,150,${Math.random() * 0.25})`;
-    ctx.lineWidth = 1;
-    const x = Math.random() * 2048;
-    const y = Math.random() * 512;
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(x + (Math.random() - 0.5) * 140, y + (Math.random() - 0.5) * 40);
-    ctx.stroke();
-  }
-
-  const texture = new THREE.CanvasTexture(canvas);
-  texture.colorSpace = THREE.SRGBColorSpace;
-  texture.anisotropy = 4;
-  return texture;
-}
-
 export interface Table {
   readonly group: THREE.Group;
   readonly flamePosition: THREE.Vector3;
+  /** Moves the flame and returns how bright the candle is just now, around 1, for the light it casts. */
+  update(time: number): number;
 }
 
 export function buildTable(): Table {
   const group = new THREE.Group();
 
-  const wood = weatheredWood();
+  const wood = pixelWood(7);
   const top = new THREE.Mesh(
-    new THREE.BoxGeometry(TABLE_HALF_WIDTH * 2, 0.5, TABLE_HALF_DEPTH * 2),
-    new THREE.MeshStandardMaterial({ map: wood, bumpMap: wood, bumpScale: 2, roughness: 0.92 }),
+    new THREE.BoxGeometry(TABLE_HALF_WIDTH * 2, 0.5, TABLE_DEPTH),
+    new THREE.MeshStandardMaterial({ map: wood, roughness: 1 }),
   );
-  top.position.y = TABLE_TOP - 0.25;
+  top.position.set(0, TABLE_TOP - 0.25, TABLE_CENTER_Z);
   top.receiveShadow = true;
   top.castShadow = true;
   group.add(top);
 
   // A solid body, so nothing behind the table shows through beneath the top.
   const body = new THREE.Mesh(
-    new THREE.BoxGeometry(TABLE_HALF_WIDTH * 2 - 1, BODY_DEPTH, TABLE_HALF_DEPTH * 2 - 0.8),
+    new THREE.BoxGeometry(TABLE_HALF_WIDTH * 2 - 1, BODY_DEPTH, TABLE_DEPTH - 0.8),
     new THREE.MeshStandardMaterial({ color: 0x1a120d, roughness: 1 }),
   );
-  body.position.y = TABLE_TOP - 0.5 - BODY_DEPTH / 2;
+  body.position.set(0, TABLE_TOP - 0.5 - BODY_DEPTH / 2, TABLE_CENTER_Z);
   group.add(body);
 
-  const brass = new THREE.MeshStandardMaterial({ color: 0x9a7b3a, roughness: 0.45, metalness: 0.5 });
-  const wax = new THREE.MeshStandardMaterial({ color: 0xd9cfae, roughness: 0.8 });
+  const surface = (palette: readonly string[], seed: number, streak = 1) =>
+    new THREE.MeshStandardMaterial({ map: pixelSurface(palette, seed, { streak, base: 0.55, contrast: 0.7 }), roughness: 1 });
+  const brass = surface(['#0c0903', '#2a1f08', '#54400f', '#8a6c1c', '#c29a2c', '#efd166'], 21);
+  const wax = surface(['#1a160c', '#4a422a', '#8a7e58', '#c2b686', '#e6dcac'], 22, 4);
   const candle = new THREE.Group();
   candle.position.set(-6.4, TABLE_TOP, -2.5);
   const dish = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.6, 0.12, 20), brass);
@@ -135,21 +54,46 @@ export function buildTable(): Table {
   cup.position.y = 0.68;
   const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.16, 1.0, 12), wax);
   stick.position.y = 1.2;
-  const flame = new THREE.Mesh(new THREE.ConeGeometry(0.11, 0.34, 10), new THREE.MeshBasicMaterial({ color: 0xffd36a, fog: false }));
-  flame.position.y = 1.87;
-  for (const part of [dish, stem, cup, stick]) part.castShadow = true;
+  // The flame is two teardrops, a pale core inside an orange skin, pivoting from their bases so they can lean and lick.
+  const flameGeometry = new THREE.ConeGeometry(0.11, 0.36, 10);
+  flameGeometry.translate(0, 0.18, 0);
+  const flame = new THREE.Group();
+  flame.position.y = 1.7;
+  const outer = new THREE.Mesh(flameGeometry, new THREE.MeshBasicMaterial({ color: 0xff9a2a, fog: false }));
+  const core = new THREE.Mesh(flameGeometry, new THREE.MeshBasicMaterial({ color: 0xfff0b0, fog: false }));
+  core.scale.set(0.5, 0.62, 0.5);
+  flame.add(outer, core);
+  for (const part of [dish, stem, cup, stick]) {
+    part.castShadow = true;
+  }
   candle.add(dish, stem, cup, stick, flame);
   group.add(candle);
   const flamePosition = new THREE.Vector3(-6.4, 2.0, -2.5);
 
-  const staves = new THREE.MeshStandardMaterial({ color: 0x5c3d24, roughness: 0.9 });
-  const iron = new THREE.MeshStandardMaterial({ color: 0x2a2724, roughness: 0.6, metalness: 0.4 });
+  const staves = surface(WOOD_PALETTE, 23, 5);
+  const iron = surface(['#050505', '#141414', '#2b2b28', '#4a4a42'], 24);
   const tankard = new THREE.Group();
   tankard.position.set(-4.7, TABLE_TOP, -2.5);
-  const mug = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.5, 1.05, 18), staves);
+  const mug = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.5, 1.05, 18, 1, true), staves);
+  staves.side = THREE.DoubleSide;
   mug.position.y = 0.525;
   mug.castShadow = true;
   tankard.add(mug);
+  // The ale, a little below the rim, with a pale head of foam that sways slightly.
+  const aleMaterial = new THREE.MeshStandardMaterial({
+    map: pixelSurface(['#1a0a03', '#3d1d07', '#6e3a0c', '#a35f14', '#d1902a'], 27, { size: 32, streak: 1, base: 0.55, contrast: 0.6 }),
+    emissive: 0xb86a14,
+    emissiveIntensity: 0.25,
+    roughness: 0.4,
+  });
+  const ale = new THREE.Mesh(new THREE.CircleGeometry(0.44, 20), aleMaterial);
+  ale.rotation.x = -Math.PI / 2;
+  ale.position.y = 0.86;
+  const foam = new THREE.Mesh(new THREE.CircleGeometry(0.4, 20), new THREE.MeshStandardMaterial({ color: 0xe8d9a8, roughness: 1, emissive: 0x6a5a30, emissiveIntensity: 0.3 }));
+  foam.rotation.x = -Math.PI / 2;
+  foam.position.y = 0.875;
+  foam.scale.set(0.82, 0.82, 1);
+  tankard.add(ale, foam);
   for (const y of [0.2, 0.85]) {
     const hoop = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.5, 0.08, 18), iron);
     hoop.position.y = y;
@@ -161,13 +105,13 @@ export function buildTable(): Table {
   tankard.add(handle);
   group.add(tankard);
 
-  const leather = new THREE.MeshStandardMaterial({ color: 0x4a3222, roughness: 0.95 });
+  const leather = surface(['#060302', '#1a0e08', '#33200f', '#573719'], 25, 2);
   const purse = new THREE.Mesh(new THREE.SphereGeometry(0.62, 16, 12), leather);
   purse.scale.set(1, 0.8, 1);
   purse.position.set(6.4, 0.5, 2.3);
   purse.castShadow = true;
   group.add(purse);
-  const gold = new THREE.MeshStandardMaterial({ color: 0xb08d3a, roughness: 0.4, metalness: 0.5 });
+  const gold = surface(['#0c0903', '#2a1f08', '#54400f', '#8a6c1c', '#c29a2c', '#efd166'], 26);
   [
     [5.4, 2.6, 4],
     [5.05, 2.05, 2],
@@ -180,5 +124,20 @@ export function buildTable(): Table {
     group.add(stack);
   });
 
-  return { group, flamePosition };
+  // Two rates of flicker that never line up, plus the odd gutter, so it reads as a real flame in a draught.
+  const noise = (t: number, k: number) => Math.sin(t * 7.3 + k) * 0.5 + Math.sin(t * 12.9 + k * 2.1) * 0.3 + Math.sin(t * 23.1 + k * 0.7) * 0.2;
+  const update = (time: number) => {
+    const gutter = Math.max(0, Math.sin(time * 0.9 + Math.sin(time * 0.37) * 3) - 0.85) * 4;
+    const tall = 1 + noise(time, 0) * 0.22 - gutter * 0.25;
+    outer.scale.set(1 - noise(time, 3) * 0.12, tall, 1 - noise(time, 5) * 0.12);
+    core.scale.set(0.5, 0.62 * tall, 0.5);
+    flame.rotation.z = noise(time, 1) * 0.28;
+    flame.rotation.x = noise(time, 2) * 0.22;
+    foam.position.x = Math.sin(time * 1.3) * 0.01;
+    const brightness = 1 + noise(time, 4) * 0.16 - gutter * 0.12;
+    aleMaterial.emissiveIntensity = 0.2 * brightness;
+    return brightness;
+  };
+
+  return { group, flamePosition, update };
 }

@@ -87,7 +87,7 @@
   .bubble {
     position: absolute;
     left: clamp(0.75rem, 4vw, 3rem);
-    top: 30%;
+    top: 10%;
     width: min(23rem, 88vw);
     padding: 1.2rem 1.4rem 1.3rem;
     background: rgba(252, 250, 244, 0.98);

@@ -14,6 +14,8 @@
 
   const OPPONENT_THINK_MS = 1500;
   const OPPONENT_CALL_MS = 900;
+  const IMPATIENT_AFTER_MS = 7000;
+  const FUMING_AFTER_MS = 16000;
 
   const store = new GameStore();
   // Separate from the match RNG so AI bluffing doesn't perturb dice rolls.
@@ -61,10 +63,23 @@
         const bid = store.currentBid;
         if (!result || !bid) return '';
         const loser = result.loser === 'player' ? 'You lose' : 'Opponent loses';
-        return `There were ${describeCount(result.actualCount, bid.face)}. ${loser} a die.`;
+        return `There ${result.actualCount === 1 ? 'was' : 'were'} ${describeCount(result.actualCount, bid.face)}. ${loser} a die.`;
       }
     }
   });
+
+  // If you take your time, the monk grows restless, and then angry.
+  let waitTimers: ReturnType<typeof setTimeout>[] = [];
+
+  function stopWaiting(): void {
+    for (const timer of waitTimers) clearTimeout(timer);
+    waitTimers = [];
+  }
+
+  function startWaiting(): void {
+    stopWaiting();
+    waitTimers = [setTimeout(() => diceCanvas.setMood('impatient'), IMPATIENT_AFTER_MS), setTimeout(() => diceCanvas.setMood('fuming'), FUMING_AFTER_MS)];
+  }
 
   function delay(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -76,8 +91,8 @@
     store.call(by);
     if (by === 'ai' && store.lastCallResult) memory.recordPlayerBidTested(store.lastCallResult.bidWasTrue);
     const opponentLost = store.lastCallResult?.loser === 'ai';
-    diceCanvas.setMood(opponentLost ? 'dismayed' : 'smug');
-    if (!opponentLost) diceCanvas.speak(1.2);
+    diceCanvas.setMood(opponentLost ? 'enraged' : 'gloating');
+    diceCanvas.speak(opponentLost ? 1 : 1.6);
   }
 
   async function runOpponentTurnIfDue(): Promise<void> {
@@ -103,22 +118,26 @@
       store.submitBid('ai', decision.bid);
       diceCanvas.speak(0.9 + decision.bid.quantity * 0.12);
       diceCanvas.setMood('idle');
+      startWaiting();
     }
     busy = false;
   }
 
   async function startRound(): Promise<void> {
+    stopWaiting();
     busy = true;
     diceCanvas.setMood('idle');
     memory.startRound();
     store.startRound();
     await diceCanvas.roll({ player: store.playerHand, ai: store.state.hands.ai });
     busy = false;
+    if (store.isPlayerTurn) startWaiting();
     await runOpponentTurnIfDue();
   }
 
   function submitPlayerBid(bid: Bid): void {
     if (!store.isPlayerTurn) return;
+    stopWaiting();
     if (store.currentBid !== null) memory.recordPlayerResponse(false);
     memory.recordPlayerBid(bid);
     store.submitBid('player', bid);
@@ -127,6 +146,7 @@
 
   async function submitPlayerCall(): Promise<void> {
     if (!store.isPlayerTurn || store.currentBid === null) return;
+    stopWaiting();
     memory.recordPlayerResponse(true);
     busy = true;
     diceCanvas.setMood('tense');
@@ -135,6 +155,7 @@
   }
 
   function playAgain(): void {
+    stopWaiting();
     store.reset();
     diceCanvas.clear();
     diceCanvas.setMood('idle');
@@ -147,7 +168,7 @@
   </div>
 
   <div class="hud">
-    <DiceCounter side="left" color="blue" label="Your dice" count={store.diceCounts.player} total={STARTING_DICE} />
+    <DiceCounter side="left" color="blue" losesFrom="left" label="Your dice" count={store.diceCounts.player} total={STARTING_DICE} />
     <DiceCounter side="right" color="red" label="Opponent's dice" count={store.diceCounts.ai} total={STARTING_DICE} />
     <button class="help" aria-label="How to play" onclick={() => (showRules = true)}>?</button>
 
@@ -215,7 +236,7 @@
   .cta {
     position: absolute;
     left: clamp(0.75rem, 4vw, 3rem);
-    top: 34%;
+    top: 10%;
     padding: 0.7rem 2.2rem;
     font-size: 1.4rem;
     background: rgba(252, 250, 244, 0.97);
