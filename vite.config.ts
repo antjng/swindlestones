@@ -6,6 +6,6 @@ export default defineConfig({
   plugins: [svelte()],
   test: {
     environment: 'node',
-    include: ['src/lib/game/**/*.test.ts', 'src/lib/scene/**/*.test.ts'],
+    include: ['src/lib/game/**/*.test.ts', 'src/lib/scene/**/*.test.ts', 'src/lib/net/**/*.test.ts'],
   },
 })

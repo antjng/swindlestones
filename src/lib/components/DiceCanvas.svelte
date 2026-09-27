@@ -30,6 +30,11 @@
     return sceneManager?.knockTable(by) ?? Promise.resolve();
   }
 
+  /** Tells the scene what his dice really show, once the other player's hand is known. */
+  export function setOpponentFaces(faces: readonly Face[]): void {
+    sceneManager?.assignOpponentFaces(faces);
+  }
+
   /** The loser of a die flicks one off the table. */
   export function loseDie(who: 'player' | 'ai'): Promise<void> {
     return sceneManager?.loseDie(who) ?? Promise.resolve();

@@ -1,8 +1,12 @@
 <script lang="ts">
+  import { onDestroy, onMount } from 'svelte';
   import { AiMemory, DEFAULT_AI_CONFIG, decideAiAction } from '../game/ai';
   import { mulberry32, randomSeed } from '../game/rng';
   import { GameStore } from '../state/gameStore.svelte';
-  import type { Bid, PlayerId } from '../game/types';
+  import { ViewStore } from '../state/viewStore.svelte';
+  import type { MatchReader } from '../state/matchReader';
+  import type { OnlineSession, SessionUpdate } from '../net/session';
+  import type { Bid, Face, PlayerId } from '../game/types';
   import { STARTING_DICE } from '../game/match';
   import Banner from './Banner.svelte';
   import type { LogEntry } from './Banner.svelte';
@@ -18,7 +22,21 @@
   const IMPATIENT_AFTER_MS = 7000;
   const FUMING_AFTER_MS = 16000;
 
-  const store = new GameStore();
+  interface Props {
+    /** Set when playing against another person: the line to them. Otherwise the opponent is the monk's own cunning. */
+    session?: OnlineSession | null;
+    onLeave?: () => void;
+  }
+
+  const { session = null, onLeave }: Props = $props();
+
+  // Against the computer the match is kept here; against a person the host keeps it and this only shows what we are told.
+  // The session never changes for the life of this screen, so reading it once here is right.
+  // svelte-ignore state_referenced_locally
+  const local = session ? null : new GameStore();
+  // svelte-ignore state_referenced_locally
+  const view = session ? new ViewStore() : null;
+  const store: MatchReader = (local ?? view)!;
   // Separate from the match RNG so AI bluffing doesn't perturb dice rolls.
   const aiRng = mulberry32(randomSeed());
   // What the opponent has learned about how you play; it carries across matches.
@@ -30,6 +48,9 @@
   let round = 0;
   let pendingLoser: PlayerId | null = null;
   let flicking = $state(false);
+  // Online only: waiting for the table to answer a button press, and whether the other player has gone.
+  let starting = $state(false);
+  let opponentLeft = $state(false);
 
   async function flickPendingDie(): Promise<void> {
     const loser = pendingLoser;
@@ -107,18 +128,19 @@
   }
 
   /** Reveals the hands, then records the call, so the result only shows once the dice are visible. */
-  async function resolveCall(by: PlayerId): Promise<void> {
+  async function resolveCall(by: PlayerId, apply: () => void = () => local!.call(by), opponentFaces?: readonly Face[]): Promise<void> {
     log(by === 'player' ? 'you' : 'monk', by === 'player' ? 'You call!' : 'Opponent calls!');
     await diceCanvas.knock(by);
+    if (opponentFaces) diceCanvas.setOpponentFaces(opponentFaces);
     await diceCanvas.reveal();
-    store.call(by);
+    apply();
     const shown = store.lastCallResult;
     const bid = store.currentBid;
     if (shown && bid) {
       log('result', `${shown.loser === 'player' ? 'You lose' : 'Opponent loses'} a die: there ${shown.actualCount === 1 ? 'was' : 'were'} ${describeCount(shown.actualCount, bid.face)}.`);
       log('result', `Yours: ${store.playerHand.join(' ')}. His: ${store.state.hands.ai.join(' ')}.`);
     }
-    if (by === 'ai' && store.lastCallResult) memory.recordPlayerBidTested(store.lastCallResult.bidWasTrue);
+    if (local && by === 'ai' && store.lastCallResult) memory.recordPlayerBidTested(store.lastCallResult.bidWasTrue);
     const opponentLost = store.lastCallResult?.loser === 'ai';
     diceCanvas.setMood(opponentLost ? 'enraged' : 'gloating');
     diceCanvas.speak(opponentLost ? 1 : 1.6);
@@ -148,7 +170,7 @@
       await resolveCall('ai');
     } else {
       log('monk', `Opponent bids ${describeBid(decision.bid)}.`);
-      store.submitBid('ai', decision.bid);
+      local!.submitBid('ai', decision.bid);
       diceCanvas.speak(0.9 + decision.bid.quantity * 0.12);
       diceCanvas.setMood('idle');
       startWaiting();
@@ -157,12 +179,17 @@
   }
 
   async function startRound(): Promise<void> {
+    if (session) {
+      starting = true;
+      session.requestStart();
+      return;
+    }
     stopWaiting();
     busy = true;
     await flickPendingDie();
     diceCanvas.setMood('idle');
     memory.startRound();
-    store.startRound();
+    local!.startRound();
     round += 1;
     log('round', `Round ${round}: ${store.diceCounts.player} dice against ${store.diceCounts.ai}`);
     await diceCanvas.roll({ player: store.playerHand, ai: store.state.hands.ai });
@@ -173,16 +200,26 @@
 
   function submitPlayerBid(bid: Bid): void {
     if (!store.isPlayerTurn) return;
+    if (session) {
+      busy = true;
+      session.bid(bid);
+      return;
+    }
     stopWaiting();
     if (store.currentBid !== null) memory.recordPlayerResponse(false);
     memory.recordPlayerBid(bid);
     log('you', `You bid ${describeBid(bid)}.`);
-    store.submitBid('player', bid);
+    local!.submitBid('player', bid);
     void runOpponentTurnIfDue();
   }
 
   async function submitPlayerCall(): Promise<void> {
     if (!store.isPlayerTurn || store.currentBid === null) return;
+    if (session) {
+      busy = true;
+      session.call();
+      return;
+    }
     stopWaiting();
     memory.recordPlayerResponse(true);
     busy = true;
@@ -191,9 +228,87 @@
     busy = false;
   }
 
+  // Online, everything that happens, yours or theirs, comes back as an update, and is played out one at a time.
+  let queue: Promise<void> = Promise.resolve();
+
+  function onSessionUpdate(update: SessionUpdate): void {
+    queue = queue.then(() => handleUpdate(update)).catch((error) => console.error(error));
+  }
+
+  async function handleUpdate({ kind, by, state }: SessionUpdate): Promise<void> {
+    const shown = view!;
+    switch (kind) {
+      case 'reset':
+        shown.receive(state);
+        shown.apply();
+        stopWaiting();
+        pendingLoser = null;
+        history = [];
+        round = 0;
+        busy = false;
+        starting = false;
+        diceCanvas.clear();
+        diceCanvas.setMood('idle');
+        return;
+      case 'start':
+        busy = true;
+        starting = false;
+        await flickPendingDie();
+        diceCanvas.setMood('idle');
+        shown.receive(state);
+        shown.apply();
+        round += 1;
+        log('round', `Round ${round}: ${store.diceCounts.player} dice against ${store.diceCounts.ai}`);
+        await diceCanvas.roll({ player: store.playerHand, ai: store.state.hands.ai });
+        busy = false;
+        diceCanvas.setMood(store.isPlayerTurn ? 'idle' : 'thinking');
+        return;
+      case 'bid': {
+        shown.receive(state);
+        shown.apply();
+        const bid = state.currentBid;
+        if (bid) log(by === 'player' ? 'you' : 'monk', `${by === 'player' ? 'You' : 'Opponent'} bid ${describeBid(bid)}.`);
+        if (by === 'ai') {
+          if (bid) diceCanvas.speak(0.9 + bid.quantity * 0.12);
+          diceCanvas.setMood('idle');
+        } else {
+          diceCanvas.setMood('thinking');
+        }
+        busy = false;
+        return;
+      }
+      case 'call':
+        busy = true;
+        shown.receive(state);
+        diceCanvas.setMood(by === 'player' ? 'tense' : 'calling');
+        if (by === 'ai') diceCanvas.speak(0.9);
+        await resolveCall(by, () => shown.apply(), state.hands.ai);
+        busy = false;
+        return;
+    }
+  }
+
+  onMount(() => {
+    if (!session) return;
+    session.onUpdate(onSessionUpdate);
+    session.onClose(() => (opponentLeft = true));
+    session.begin();
+  });
+
+  onDestroy(() => session?.close());
+
+  function leave(): void {
+    session?.close();
+    onLeave?.();
+  }
+
   function playAgain(): void {
+    if (session) {
+      session.rematch();
+      return;
+    }
     stopWaiting();
-    store.reset();
+    local!.reset();
     pendingLoser = null;
     history = [];
     round = 0;
@@ -211,13 +326,16 @@
     <DiceCounter side="left" color="blue" losesFrom="left" label="Your dice" count={store.diceCounts.player} total={STARTING_DICE} />
     <DiceCounter side="right" color="red" label="Opponent's dice" count={store.diceCounts.ai} total={STARTING_DICE} />
     <button class="help" aria-label="How to play" onclick={() => (showRules = true)}>?</button>
+    {#if session}
+      <button class="leave" onclick={leave}>Leave table</button>
+    {/if}
 
     {#if showBidding}
       <BidBubble legalBids={store.legalNextBids} currentBid={store.currentBid} onBid={submitPlayerBid} onCall={submitPlayerCall} />
     {/if}
 
     {#if store.phase === 'awaitingRoll' || store.phase === 'roundOver'}
-      <button class="cta" disabled={busy} onclick={startRound}>
+      <button class="cta" disabled={busy || starting} onclick={startRound}>
         {store.phase === 'awaitingRoll' ? 'Roll the dice' : 'Next round'}
       </button>
     {/if}
@@ -227,6 +345,15 @@
 
   {#if store.phase === 'matchOver' && store.winner}
     <GameOverModal winner={store.winner} onPlayAgain={playAgain} />
+  {/if}
+
+  {#if opponentLeft && store.phase !== 'matchOver'}
+    <div class="left" role="alertdialog" aria-label="Opponent left">
+      <div class="left-card">
+        <p>Your opponent has left the table.</p>
+        <button onclick={leave}>Back to the start</button>
+      </div>
+    </div>
   {/if}
 
   {#if showRules}
@@ -272,6 +399,42 @@
   .help:hover:not(:disabled) {
     background: #f4efe4;
     color: #1c1c20;
+  }
+  .leave {
+    position: absolute;
+    top: 4.4rem;
+    right: 4.6rem;
+    height: 2.6rem;
+    padding: 0 1rem;
+    font-size: 1rem;
+    color: #f4efe4;
+    background: rgba(28, 28, 32, 0.82);
+    border: 2px solid #56565c;
+    border-radius: 1.3rem;
+    box-shadow: none;
+  }
+  .leave:hover {
+    background: #f4efe4;
+    color: #1c1c20;
+  }
+  .left {
+    position: absolute;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    background: rgba(5, 3, 2, 0.6);
+  }
+  .left-card {
+    padding: 1.6rem 2.2rem;
+    text-align: center;
+    background: #f1ecdf;
+    color: #2d2f45;
+    border-radius: 0.6rem;
+    box-shadow: 0 8px 30px rgba(0, 0, 0, 0.6);
+  }
+  .left-card p {
+    margin: 0 0 1rem;
+    font-size: 1.3rem;
   }
   .cta {
     position: absolute;

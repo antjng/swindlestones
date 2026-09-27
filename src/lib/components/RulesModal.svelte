@@ -15,7 +15,7 @@
     <ol>
       <li>
         You and your opponent each begin with {STARTING_DICE} dice. Each die has eight faces, two
-        each of 1, 2, 3 and 4 pips. You may look at your own dice; your opponent's stay hidden under
+        each of 1, 2, 3, and 4 pips. You may look at your own dice; your opponent's stay hidden under
         his hand.
       </li>
       <li>

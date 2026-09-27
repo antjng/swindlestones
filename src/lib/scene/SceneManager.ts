@@ -278,6 +278,19 @@ export class SceneManager {
     return this.locked(this.doReveal());
   }
 
+  /**
+   * In a game against another person, his dice are only stand-ins until they are shown: this gives them the faces they really have,
+   * while they are still out of sight.
+   */
+  assignOpponentFaces(faces: readonly Face[]): void {
+    this.aiDice.forEach((die, i) => {
+      const face = faces[i];
+      if (face === undefined) return;
+      die.quaternion.copy(facingQuaternion(face, (Math.random() - 0.5) * 0.5));
+      die.position.y = restHeight(die.quaternion);
+    });
+  }
+
   /** Whoever lost a die flicks one off the table. */
   loseDie(by: 'player' | 'ai'): Promise<void> {
     return this.locked(this.doLoseDie(by));
