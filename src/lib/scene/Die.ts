@@ -177,6 +177,7 @@ function getMaterials(owner: PlayerId): THREE.Material[] {
 
 export function createDieMesh(owner: PlayerId): THREE.Mesh {
   const mesh = new THREE.Mesh(getGeometry(), getMaterials(owner));
+  mesh.userData.pick = 'die';
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   return mesh;

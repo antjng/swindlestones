@@ -3,7 +3,9 @@ import type { Face } from '../game/types';
 import { FlatHand } from './Hands';
 import { createDieMesh, facingQuaternion, restHeight } from './Die';
 import { STARTING_DICE } from '../game/match';
-import { AI_DICE_CENTER, PLAYER_HAND_BACK, PLAYER_HAND_FINGERS, PLAYER_HAND_REST, PLAYER_ROW_SPACING, PLAYER_ROW_START, PLAYER_ROW_Z } from './layout';
+import { AI_DICE_CENTER, OPPONENT_X, OPPONENT_Z, PLAYER_HAND_BACK, PLAYER_HAND_FINGERS, PLAYER_HAND_REST, PLAYER_ROW_SPACING, PLAYER_ROW_START, PLAYER_ROW_Z } from './layout';
+import { simulateFlick } from './dicePhysics';
+import type { Obstacle } from './dicePhysics';
 import { Opponent } from './Opponent';
 import type { OpponentMood } from './Opponent';
 import { PixelPass } from './post';
@@ -13,6 +15,7 @@ import { buildTable } from './Table';
 import { Tweens, easeInOutCubic, easeOutCubic } from './tween';
 
 export type { OpponentMood } from './Opponent';
+
 
 /** How his guarding hand stands: on edge like a low wall, fingers reaching across to his right, thumb up, the back of it toward us. */
 const GUARD_FINGERS = new THREE.Vector3(-0.95, 0.3, 0).normalize();
@@ -71,6 +74,23 @@ export class SceneManager {
   // Both hands (his left, your left) guard their dice the same way: standing on edge, palm toward the dice.
   private readonly aiHand = new FlatHand(true, 301);
   private readonly playerHand = new FlatHand(true, 302);
+  /** Your right hand, which only appears to knock on the table. */
+  private readonly rightHand = new FlatHand(false, 303);
+  /** His right hand, which takes over from his resting one to flick a die. */
+  private readonly monkRightHand = new FlatHand(false, 304);
+  private readonly raycaster = new THREE.Raycaster();
+  private locks = 0;
+  /** While your hand is poised to flick, the dice you can choose from, and the one you have clicked or are hovering over. */
+  private flickChoices: THREE.Object3D[] | null = null;
+  private flickChosen: THREE.Object3D | null = null;
+  private flickHoverDie: THREE.Object3D | null = null;
+  /** Where on the die the pointer is, which sets the angle of the flick. */
+  private flickAimPoint: THREE.Vector3 | null = null;
+  /** Run every frame while your hand is poised, so it follows the pointer smoothly rather than in fits and starts. */
+  private flickTick: (() => void) | null = null;
+  private flickFinish: (() => void) | null = null;
+  /** An unseen hand of your size, used to measure where a fingertip lands at any angle. */
+  private readonly probeHand = new FlatHand(false, 399);
   private readonly diceGroup = new THREE.Group();
   private readonly tweens = new Tweens();
   private readonly resizeObserver: ResizeObserver;
@@ -153,14 +173,22 @@ export class SceneManager {
       this.opponent.group,
       this.aiHand.group,
       this.playerHand.group,
+      this.rightHand.group,
+      this.monkRightHand.group,
+      this.opponent.hitbox,
       this.diceGroup,
     );
 
     this.aiHand.setSize(0.6);
+    this.rightHand.setSize(0.9);
+    this.monkRightHand.setSize(0.6);
+    this.probeHand.setSize(0.9);
     this.playerHand.setSize(1.0);
 
     this.resetHands();
 
+    canvas.addEventListener('pointerdown', this.onPointerDown);
+    canvas.addEventListener('pointermove', this.onPointerMove);
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
     this.resizeObserver.observe(canvas);
     this.handleResize();
@@ -236,7 +264,265 @@ export class SceneManager {
     this.resetHands();
   }
 
-  async rollDice(hands: { player: readonly Face[]; ai: readonly Face[] }): Promise<void> {
+  /** While the scene is playing out a move, the pointer leaves things alone. */
+  private locked<T>(work: Promise<T>): Promise<T> {
+    this.locks++;
+    return work.finally(() => this.locks--);
+  }
+
+  rollDice(hands: { player: readonly Face[]; ai: readonly Face[] }): Promise<void> {
+    return this.locked(this.doRoll(hands));
+  }
+
+  revealHands(): Promise<void> {
+    return this.locked(this.doReveal());
+  }
+
+  /** Whoever lost a die flicks one off the table. */
+  loseDie(by: 'player' | 'ai'): Promise<void> {
+    return this.locked(this.doLoseDie(by));
+  }
+
+  private async doLoseDie(by: 'player' | 'ai'): Promise<void> {
+    const monk = by === 'ai';
+    const pool: THREE.Object3D[] = monk ? [...this.aiDice] : this.diceGroup.children.filter((die) => !this.aiDice.includes(die as THREE.Mesh));
+    if (pool.length === 0) return;
+    const hand = monk ? this.monkRightHand : this.rightHand;
+    const up = new THREE.Vector3(0, 1, 0);
+    const yAxis = new THREE.Vector3(0, 1, 0);
+
+    // Each flicks across the table, along the line their hand points. He reaches in from the side, past the edge of his robe, toward you.
+    // You are aiming at him, or just away from you, and your aim is never quite true.
+    // His hand always comes in from his side, but the flick itself might go anywhere from across the table to straight at you.
+    // Yours starts pointing straight ahead, then follows where on the die the pointer is, so you choose the angle.
+    const forward = monk ? new THREE.Vector3(0.8, 0, 0.6).normalize() : new THREE.Vector3(0, 0, -1);
+    const error = (Math.random() - 0.5) * (monk ? 1.0 : 0.16);
+
+    // Measure once where the fingertip is, relative to the wrist, when the finger is straight; a hand at any strike position then touches the die with it.
+    hand.setVisible(true);
+    const gauge = monk ? hand : this.probeHand;
+    gauge.setPose('point', true);
+    const probe = new THREE.Vector3(0, 0.5, 0);
+    const tipOffset = new THREE.Vector3();
+    const measure = () => {
+      gauge.placeByAxes(probe, forward, up);
+      gauge.redraw();
+      tipOffset.copy(gauge.fingertip()).sub(probe);
+    };
+    measure();
+    const strikeAt = (at: THREE.Vector3) => new THREE.Vector3(at.x - forward.x * 0.42 - tipOffset.x, 0.5, at.z - forward.z * 0.42 - tipOffset.z);
+    // Cocked, the hand is drawn back so the finger has room to whip out.
+    const cockedAt = (at: THREE.Vector3) => strikeAt(at).addScaledVector(forward, -0.9);
+    // Hovering, the hand comes right up to the die, fingertip just short of it.
+    const nearAt = (at: THREE.Vector3) => strikeAt(at).addScaledVector(forward, -0.3);
+
+    // While it waits for your choice, the hand hovers off to the side, up off the table where it can be seen.
+    const poiseY = 0.9;
+    const poiseSide = new THREE.Vector3(-forward.z * 2.3, 0, forward.x * 2.3);
+    // He flicks his right-most die, which from where you sit is the one on the left; you start on your right-most.
+    const rightMost = pool.reduce((a, b) => ((monk ? b.position.x < a.position.x : b.position.x > a.position.x) ? b : a));
+
+    // The hand reaches in from its own side of the table, fingertip cocked against the thumb.
+    let from: HandState;
+    const firstCocked = cockedAt(rightMost.position);
+    if (monk) {
+      // His right hand, on the left of the picture, takes over from his own resting hand.
+      const start = this.opponent.handWrist(0);
+      hand.setPose('relaxed', true);
+      this.opponent.setRightHandOut(true);
+      from = flatState(start, 0.1);
+    } else {
+      hand.setPose('relaxed', true);
+      from = { wrist: firstCocked.clone().addScaledVector(forward, -3.5).add(new THREE.Vector3(0, 0.4, 0)), fingers: forward, back: up };
+    }
+    const firstGoal = monk ? firstCocked : nearAt(rightMost.position).add(poiseSide).setY(poiseY);
+    await this.moveHandState(hand, from, { wrist: firstGoal, fingers: forward, back: up }, 500, easeInOutCubic);
+    hand.setPose('fist');
+
+    let die = rightMost;
+    // How far the poised hand still is from the die once you have chosen, to be closed in the build-up.
+    let carry = new THREE.Vector3();
+    if (!monk) {
+      // Every one of your dice can be flicked: each is outlined, the outline glows under the pointer, and the hand comes to whichever die you are over.
+      const outlines = pool.map((candidate) => {
+        const outline = new THREE.Mesh(
+          (candidate as THREE.Mesh).geometry,
+          new THREE.MeshBasicMaterial({ color: 0xc9a24a, side: THREE.BackSide, transparent: true, opacity: 0.45, depthWrite: false, fog: false }),
+        );
+        outline.scale.setScalar(1.08);
+        candidate.add(outline);
+        candidate.userData.glow = 0;
+        return { candidate, outline };
+      });
+      this.flickChoices = pool;
+      this.flickChosen = null;
+      this.flickHoverDie = null;
+      const dim = new THREE.Color(0xc9a24a);
+      const bright = new THREE.Color(0xfff2b0);
+      const anchor = rightMost.position.clone();
+      const handAt = new THREE.Vector3();
+      let lean = 0;
+      let last = performance.now();
+      const step = () => {
+        const nowMs = performance.now();
+        const dt = Math.min(0.1, (nowMs - last) / 1000);
+        last = nowMs;
+        const now = nowMs / 1000;
+        const hovered = this.flickHoverDie;
+        if (hovered) anchor.lerp(hovered.position, 1 - Math.exp(-dt * 7));
+        // Where on the die the pointer is sets the angle: dead centre, the hand faces straight ahead and the die goes straight ahead;
+        // toward an edge, the hand comes at the die from that side and the flick goes from there through its middle.
+        if (hovered && this.flickAimPoint) {
+          const off = new THREE.Vector3(hovered.position.x - this.flickAimPoint.x, 0, hovered.position.z - this.flickAimPoint.z);
+          const size = off.length();
+          const weight = THREE.MathUtils.smoothstep(size, 0.08, 0.5);
+          const wanted = new THREE.Vector3(0, 0, -1).multiplyScalar(1 - weight);
+          if (size > 1e-4) wanted.addScaledVector(off.divideScalar(size), weight);
+          forward.lerp(wanted.normalize(), 1 - Math.exp(-dt * 7)).normalize();
+        }
+        poiseSide.set(-forward.z * 2.3, 0, forward.x * 2.3);
+        measure();
+        lean += ((hovered ? 1 : 0) - lean) * (1 - Math.exp(-dt * 5));
+        for (const { candidate, outline } of outlines) {
+          const glow = (candidate.userData.glow += ((candidate === hovered ? 1 : 0) - candidate.userData.glow) * (1 - Math.exp(-dt * 12)));
+          const material = outline.material as THREE.MeshBasicMaterial;
+          material.color.copy(dim).lerp(bright, glow);
+          material.opacity = 0.45 + 0.55 * glow * (0.88 + 0.12 * Math.sin(now * 10));
+          outline.scale.setScalar(1.08 + 0.07 * glow);
+        }
+        const away = 1 - lean;
+        // It only trembles while the pointer is over a die: poised and still otherwise.
+        const shake = 0.06 * lean * lean;
+        const place = nearAt(anchor);
+        hand.placeByAxes(
+          new THREE.Vector3(
+            place.x + poiseSide.x * away + Math.sin(now * 80) * shake,
+            place.y + (poiseY - place.y) * away + Math.abs(Math.sin(now * 61)) * shake * 0.6,
+            place.z + poiseSide.z * away + Math.sin(now * 97) * shake * 0.5,
+          ),
+          forward,
+          up,
+        );
+        handAt.set(place.x + poiseSide.x * away, place.y + (poiseY - place.y) * away, place.z + poiseSide.z * away);
+      };
+      // Driven from the frame loop, with everything eased, so the hand glides after the pointer.
+      this.flickTick = step;
+      await new Promise<void>((resolve) => {
+        this.flickFinish = resolve;
+        setTimeout(resolve, 25000);
+      });
+      this.flickTick = null;
+      this.flickFinish = null;
+      die = this.flickChosen ?? rightMost;
+      measure();
+      // What is left between where the hand is and where it needs to be, to be closed as it builds up.
+      carry = handAt.clone().sub(cockedAt(die.position));
+      for (const { candidate, outline } of outlines) {
+        candidate.remove(outline);
+        (outline.material as THREE.Material).dispose();
+      }
+      this.flickChoices = null;
+      this.flickChosen = null;
+      this.flickHoverDie = null;
+    }
+
+    const strike = strikeAt(die.position);
+    const cocked = { wrist: cockedAt(die.position), fingers: forward, back: up };
+    const launch = forward.clone().applyAxisAngle(yAxis, error);
+
+    // The build-up: the finger is drawn back against the thumb and strains, the whole hand trembling harder as the force builds.
+    const strain = monk ? 560 + Math.random() * 380 : 240;
+    const phase = Math.random() * 10;
+    await this.tweens.run(strain, (t) => {
+      const force = t * t;
+      const shake = 0.012 + 0.075 * force;
+      const close = 1 - easeInOutCubic(t);
+      hand.placeByAxes(
+        new THREE.Vector3(
+          cocked.wrist.x + carry.x * close - forward.x * 0.28 * easeInOutCubic(t) + Math.sin(t * 90 + phase) * shake,
+          cocked.wrist.y + carry.y * close + Math.abs(Math.sin(t * 73 + phase)) * shake * 0.6,
+          cocked.wrist.z + carry.z * close - forward.z * 0.28 * easeInOutCubic(t) + Math.sin(t * 111) * shake * 0.5,
+        ),
+        forward,
+        up,
+      );
+    });
+
+    // Work out where everything goes before it goes: the die thrown in an arc, off the table, bouncing off whatever is in its way,
+    // and any dice it hits knocked along in turn.
+    const props: Obstacle[] = [];
+    for (const object of this.table.pickables) {
+      if (object.userData.hitRadius) props.push({ object, x: object.position.x, z: object.position.z, r: object.userData.hitRadius, h: object.userData.hitHeight });
+    }
+    const standing = this.diceGroup.children.filter((other) => other !== die && other.visible);
+    const simulation = simulateFlick(die, standing, props, launch, { object: this.opponent.hitbox, x: OPPONENT_X, z: OPPONENT_Z });
+
+    // The flick: the finger springs free, the hand jerks forward and the die is struck at the end of it.
+    hand.setPose('point');
+    // The hand whips forward to the strike position, the fingertip arriving on the die.
+    await this.tweens.run(90, (t) => hand.placeByAxes(cocked.wrist.clone().lerp(strike, 1 - (1 - t) ** 2), forward, up));
+    this.shake = Math.max(this.shake, 0.4);
+    let played = -1;
+    await this.tweens.run(simulation.frameCount * 16, (t) => {
+      const index = Math.min(simulation.frameCount - 1, Math.floor(t * simulation.frameCount));
+      // Whatever is struck along the way reacts as it is hit.
+      for (const event of simulation.events) {
+        if (event.frame <= played || event.frame > index) continue;
+        if (event.kind === 'monk') this.opponent.annoy(true);
+        else if (event.kind === 'prop') this.wobble(event.object);
+        this.shake = Math.max(this.shake, event.kind === 'die' ? 0.15 : 0.12);
+      }
+      played = index;
+      for (const body of simulation.bodies) {
+        const state = body.frames[Math.min(index, body.frames.length - 1)];
+        body.object.position.copy(state.position);
+        body.object.quaternion.copy(state.orientation);
+        body.object.scale.setScalar(state.scale);
+      }
+    });
+    die.visible = false;
+    this.diceGroup.remove(die);
+    this.aiDice = this.aiDice.filter((d) => d !== die);
+
+    // The hand goes back where it came from.
+    if (monk) {
+      const home = this.opponent.restPosition(0);
+      await this.moveHandState(hand, cocked, flatState(home, 0.1), 500, easeInOutCubic);
+      this.opponent.releaseRightHand(home);
+      hand.setVisible(false);
+    } else {
+      await this.moveHandState(hand, cocked, from, 450, easeInOutCubic);
+      hand.setVisible(false);
+    }
+  }
+
+  /** Raps on the table, with his right hand or yours, to call. */
+  knockTable(by: 'player' | 'ai'): Promise<void> {
+    return this.locked(by === 'ai' ? this.knockMonk() : this.knockPlayer());
+  }
+
+  private async knockMonk(): Promise<void> {
+    this.opponent.knock();
+    await this.tweens.run(1000, () => undefined);
+  }
+
+  private async knockPlayer(): Promise<void> {
+    const up = new THREE.Vector3(0, 1, 0);
+    const fingers = new THREE.Vector3(-0.35, 0, -1).normalize();
+    const away: HandState = { wrist: new THREE.Vector3(7.4, 0.9, 5.6), fingers, back: up };
+    const table: HandState = { wrist: new THREE.Vector3(2.4, 0.5, 3.6), fingers, back: up };
+    this.rightHand.setPose('fist', true);
+    this.rightHand.setVisible(true);
+    await this.moveHandState(this.rightHand, away, table, 380, easeOutCubic);
+    for (let i = 0; i < 2; i++) {
+      await this.tweens.run(230, (t) => this.rightHand.placeByAxes(new THREE.Vector3(table.wrist.x, table.wrist.y + 0.8 * Math.sin(Math.PI * t), table.wrist.z), fingers, up));
+      this.shake = Math.max(this.shake, 0.3);
+    }
+    await this.moveHandState(this.rightHand, table, away, 380, easeInOutCubic);
+    this.rightHand.setVisible(false);
+  }
+
+  private async doRoll(hands: { player: readonly Face[]; ai: readonly Face[] }): Promise<void> {
     if (this.diceGroup.children.length > 0) {
       await this.sweepAway();
       this.diceGroup.clear();
@@ -248,7 +534,7 @@ export class SceneManager {
     await Promise.all([this.throwPlayerDice(hands.player), this.opponentCoversDice(hands.ai)]);
   }
 
-  async revealHands(): Promise<void> {
+  private async doReveal(): Promise<void> {
     this.slideDiceOut();
     this.opponent.setClearOfDice(true);
     this.viewGoal = 1;
@@ -305,9 +591,9 @@ export class SceneManager {
   }
 
   /**
-   * The last round's dice are retrieved with a wave, the reveal played
-   * backwards: each hand sweeps over its row, and every die it passes is
-   * plucked up, drawn into the palm as it shrinks, and gone.
+   * The last round's dice leave the way they arrived, played backwards: each
+   * hand comes back to guard its row, and the dice slide in under it, shrinking
+   * away, one after another.
    */
   private async sweepAway(): Promise<void> {
     this.viewGoal = 0;
@@ -318,67 +604,60 @@ export class SceneManager {
     const playerDice = this.diceGroup.children.filter((die) => !monkDice.includes(die as THREE.Mesh));
     const up = new THREE.Vector3(0, 1, 0);
 
-    /** Sweeps a hand along a line above a row, plucking each die into the palm as it passes over. */
-    const wave = (hand: FlatHand, dice: readonly THREE.Object3D[], from: THREE.Vector3, to: THREE.Vector3, fingers: THREE.Vector3, palmReach: number, ms: number) =>
-      this.tweens.run(ms, (t) => {
-        const u = easeInOutCubic(t);
-        const wrist = from.clone().lerp(to, u);
-        // A loose wrist: the hand dips and rolls a little as it goes, like a conjuror's pass.
-        wrist.y += Math.sin(u * Math.PI * 3) * 0.12;
-        const back = new THREE.Vector3(Math.sin(u * Math.PI * 3) * 0.22, 1, 0).normalize();
-        hand.placeByAxes(wrist, fingers, back);
-        const palm = wrist.clone().addScaledVector(fingers, palmReach).add(new THREE.Vector3(0, -0.35, 0));
-        for (const die of dice) {
-          const along = THREE.MathUtils.clamp((die.userData.x - from.x) / (to.x - from.x), 0, 1);
-          const p = THREE.MathUtils.clamp((u - along * 0.72) / 0.26, 0, 1);
-          if (p <= 0) continue;
-          const e = p * p;
-          die.position.lerpVectors(die.userData.home, palm, e);
-          // It rises a little first, as if pulled, before it drops into the hand.
-          die.position.y += Math.sin(p * Math.PI) * 0.35;
-          die.scale.setScalar(Math.max(0, 1 - e));
-          die.visible = die.scale.x > 0.03;
-        }
+    /** The reverse of slideDiceOut: each die slides toward the hand and shrinks to nothing, in the opposite order. */
+    const tuckIn = (dice: readonly THREE.Object3D[], toward: THREE.Vector3, delayMs: number) => {
+      const homes = dice.map((die) => die.position.clone());
+      const duration = 520;
+      const total = delayMs + duration + Math.max(0, dice.length - 1) * 70;
+      return this.tweens.run(total, (t) => {
+        dice.forEach((die, i) => {
+          const start = delayMs + (dice.length - 1 - i) * 70;
+          const u = THREE.MathUtils.clamp((t * total - start) / duration, 0, 1);
+          if (u <= 0) return;
+          const e = u * u;
+          const home = homes[i];
+          const to = home.clone().lerp(new THREE.Vector3(toward.x, home.y, toward.z), 0.55);
+          to.y = home.y + 0.15;
+          die.position.lerpVectors(home, to, e);
+          die.position.y = home.y + (to.y - home.y) * e + Math.sin(u * Math.PI) * 0.22 * (1 - u);
+          die.scale.setScalar(Math.max(0, 1 - e * 0.5) * (u >= 1 ? 0 : 1));
+          die.visible = u < 1;
+        });
       });
-    for (const die of [...monkDice, ...playerDice]) {
-      die.userData.x = die.position.x;
-      die.userData.home = die.position.clone();
-    }
+    };
 
-    // His left hand comes over from where it rests and passes across his row from his left to his right.
+    // His left hand goes out from where it rests, up and over, and comes down to guard his row.
     const monkStart = this.opponent.handWrist(1);
     this.aiHand.setVisible(true);
-    this.aiHand.setPose('cover', true);
+    this.aiHand.setPose('relaxed', true);
     this.opponentReachesOut = true;
-    const monkFingers = new THREE.Vector3(0.1, 0, 1).normalize();
-    const monkFrom = new THREE.Vector3(AI_DICE_CENTER.x + 2.9, 1.5, AI_DICE_CENTER.z - 1.0);
-    const monkTo = new THREE.Vector3(AI_DICE_CENTER.x - 2.9, 1.5, AI_DICE_CENTER.z - 1.0);
-    const monkWave = (async () => {
-      await this.moveHandState(this.aiHand, flatState(monkStart, 0.1), { wrist: monkFrom, fingers: monkFingers, back: up }, 480, easeInOutCubic);
-      await wave(this.aiHand, monkDice, monkFrom, monkTo, monkFingers, 1.0, 1100);
+    const guard = this.guardWrist();
+    const lifted = new THREE.Vector3(guard.x + 0.6, 2.2, guard.z - 1.4);
+    const monkReturn = (async () => {
+      await this.moveHandState(this.aiHand, flatState(monkStart, 0.1), flatState(lifted, 0.25), 450, easeInOutCubic);
+      this.aiHand.setPose('cover');
+      await this.moveHandState(this.aiHand, flatState(lifted, 0.25), guardState(guard), 450, easeInOutCubic);
+      await tuckIn(monkDice, new THREE.Vector3(guard.x - 0.8, 0, guard.z - 0.4), 100);
       for (const die of monkDice) die.visible = false;
+      // Then it lifts and turns back toward the camera, ready to shake the new dice.
+      await this.moveHandState(this.aiHand, guardState(guard), flatState(new THREE.Vector3(guard.x, 1.6, guard.z - 0.8), 0.1), 320, easeInOutCubic);
     })();
 
-    // Yours passes over your row, left to right, out of the fist it will roll from.
+    // Yours comes in from the left and settles into its guard, and your dice slide under it.
     const away = this.awayState();
-    const fingers = new THREE.Vector3(1, 0, 0.05).normalize();
-    const rowZ = PLAYER_ROW_Z - 1.0;
-    const from = new THREE.Vector3(this.visibleLeft(PLAYER_ROW_Z) - 1.0, 1.6, rowZ);
-    const lastDie = Math.max(...playerDice.map((die) => die.userData.x as number), 0);
-    const to = new THREE.Vector3(Math.max(lastDie - 3.4, from.x + 3), 1.6, rowZ);
+    const playerGuard: HandState = { wrist: PLAYER_HAND_REST.clone(), fingers: PLAYER_HAND_FINGERS.clone(), back: PLAYER_HAND_BACK.clone() };
     this.playerHand.setPose('flat');
-    const playerWave = (async () => {
-      await this.moveHandState(this.playerHand, { wrist: away.wrist, fingers: away.fingers, back: up }, { wrist: from, fingers, back: up }, 500, easeInOutCubic);
-      // The palm is 2.6 ahead of the wrist, so a die is under it when the wrist is that far short of it.
-      for (const die of playerDice) die.userData.x -= 2.6;
-      await wave(this.playerHand, playerDice, from, to, fingers, 2.6, 1100);
+    const playerReturn = (async () => {
+      await this.moveHandState(this.playerHand, { wrist: away.wrist, fingers: away.fingers, back: up }, playerGuard, 650, easeInOutCubic);
+      this.playerHand.setPose('cover');
+      await tuckIn(playerDice, new THREE.Vector3(PLAYER_HAND_REST.x + 3, 0, PLAYER_HAND_REST.z + 0.5), 100);
       for (const die of playerDice) die.visible = false;
       this.playerHand.setPose('fist');
     })();
     this.playerHandAway = false;
-    this.playerHandRest = { wrist: to.clone(), fingers, back: up.clone() };
+    this.playerHandRest = playerGuard;
 
-    await Promise.all([monkWave, playerWave]);
+    await Promise.all([monkReturn, playerReturn]);
   }
 
   private throwPlayerDice(faces: readonly Face[]): Promise<void> {
@@ -499,7 +778,7 @@ export class SceneManager {
 
     // Then the hand comes down and turns up on edge in front of them, like a man hiding his cards.
     this.aiHand.setPose('cover');
-    const dropFrom = flatState(above.clone().add(new THREE.Vector3(0, 0, 0)), 0.3);
+    const dropFrom = flatState(above.clone(), 0.3);
     await this.moveHandState(this.aiHand, dropFrom, guardState(guard), 460, easeOutCubic);
     this.aiHand.setDrumming(2.4, 0.1);
     this.coveringDice = true;
@@ -539,12 +818,138 @@ export class SceneManager {
     });
   }
 
+  private readonly onPointerDown = (event: PointerEvent): void => {
+    const hit = this.pick(event);
+    if (!hit) return;
+    if (this.flickChoices) {
+      this.flickChosen = hit.object;
+      this.flickFinish?.();
+      return;
+    }
+    switch (hit.kind) {
+      case 'die':
+        this.wiggleDie(hit.object);
+        break;
+      case 'tankard':
+      case 'coins':
+        this.wobble(hit.object);
+        break;
+      case 'candle':
+        this.table.toggleCandle();
+        break;
+      case 'monk':
+        this.opponent.annoy();
+        break;
+      case 'hand':
+        hit.hand.poke();
+        break;
+    }
+  };
+
+  private readonly onPointerMove = (event: PointerEvent): void => {
+    const hit = this.pick(event);
+    this.canvas.style.cursor = hit ? 'pointer' : '';
+    this.flickHoverDie = this.flickChoices && hit ? hit.object : null;
+    this.flickAimPoint = this.flickChoices && hit?.point ? hit.point.clone() : null;
+  };
+
+  /** Finds what is under the pointer, undoing the lens warp the picture goes through on its way to the screen. */
+  private pick(event: PointerEvent): { kind: string; object: THREE.Object3D; hand: FlatHand; point?: THREE.Vector3 } | null {
+    // The one thing that can be clicked while a move is playing out is the die you are about to flick.
+    if (this.locks > 0 && !this.flickChoices) return null;
+    const rect = this.canvas.getBoundingClientRect();
+    const aspect = rect.width / rect.height;
+    const cx = (event.clientX - rect.left) / rect.width - 0.5;
+    const cy = 0.5 - (event.clientY - rect.top) / rect.height;
+    const warp = (1 + 0.06 * ((cx * aspect) ** 2 + cy ** 2)) * 0.94;
+    this.raycaster.setFromCamera(new THREE.Vector2(cx * warp * 2, cy * warp * 2), this.camera);
+
+    const targets = [
+      ...this.diceGroup.children,
+      ...this.table.pickables,
+      this.opponent.hitbox,
+      this.playerHand.pickMesh,
+      this.aiHand.pickMesh,
+      this.rightHand.pickMesh,
+      this.monkRightHand.pickMesh,
+      ...this.opponent.handMeshes,
+    ];
+    for (const hit of this.raycaster.intersectObjects(targets, true)) {
+      let shown = true;
+      let picked: THREE.Object3D | null = hit.object;
+      let found: { kind: string; object: THREE.Object3D } | null = null;
+      let hand: FlatHand | undefined;
+      while (picked) {
+        if (!picked.visible) shown = false;
+        if (!found && picked.userData.pick) found = { kind: picked.userData.pick, object: picked };
+        if (picked.userData.hand) hand = picked.userData.hand;
+        picked = picked.parent;
+      }
+      if (!shown) continue;
+      if (this.flickChoices) {
+        if (found && this.flickChoices.includes(found.object)) return { ...found, hand: this.playerHand, point: hit.point };
+        continue;
+      }
+      if (hand) {
+        // A hand is a picture on a card: only its solid parts count.
+        if (hit.uv && hand.isSolidAt(hit.uv)) return { kind: 'hand', object: hit.object, hand };
+        continue;
+      }
+      if (found) return { ...found, hand: this.playerHand };
+    }
+    return null;
+  }
+
   /** The world x of the left edge of the view, at the depth of the given table z. */
   private visibleLeft(z: number): number {
     // Measured from the resting view, whatever the camera is doing at the moment.
     const direction = this.cameraTarget.clone().sub(this.cameraBase).normalize();
     const depth = new THREE.Vector3(0, 0, z).sub(this.cameraBase).dot(direction);
     return this.cameraBase.x - Math.tan(THREE.MathUtils.degToRad(this.camera.fov / 2)) * this.camera.aspect * depth;
+  }
+
+  /** A die shivers and hops, as if nudged. */
+  private wiggleDie(die: THREE.Object3D): void {
+    if (die.userData.wiggling) return;
+    die.userData.wiggling = true;
+    const base = die.quaternion.clone();
+    const y = die.position.y;
+    const direction = Math.random() < 0.5 ? -1 : 1;
+    const turn = new THREE.Quaternion();
+    const up = new THREE.Vector3(0, 1, 0);
+    void this.tweens.run(600, (t) => {
+      const decay = (1 - t) ** 2;
+      turn.setFromAxisAngle(up, direction * 0.45 * Math.sin(t * 20) * decay);
+      die.quaternion.copy(base).premultiply(turn);
+      die.position.y = y + Math.abs(Math.sin(t * 13)) * 0.16 * decay;
+    }).then(() => {
+      die.quaternion.copy(base);
+      die.position.y = y;
+      die.userData.wiggling = false;
+    });
+  }
+
+  /** Something on the table rocks and settles: the tankard, a stack of coins, the purse. */
+  private wobble(object: THREE.Object3D): void {
+    if (object.userData.wobbling) return;
+    object.userData.wobbling = true;
+    const rotation = object.rotation.clone();
+    const position = object.position.clone();
+    const scale = object.scale.clone();
+    const direction = Math.random() < 0.5 ? -1 : 1;
+    void this.tweens.run(700, (t) => {
+      const decay = (1 - t) ** 2;
+      const swing = Math.sin(t * 21) * decay;
+      object.rotation.z = rotation.z + direction * 0.2 * swing;
+      object.rotation.x = rotation.x + 0.1 * Math.sin(t * 17 + 1) * decay;
+      object.position.y = position.y + Math.abs(Math.sin(t * 14)) * 0.05 * decay;
+      object.scale.set(scale.x * (1 + 0.05 * swing), scale.y * (1 - 0.05 * swing), scale.z);
+    }).then(() => {
+      object.rotation.copy(rotation);
+      object.position.copy(position);
+      object.scale.copy(scale);
+      object.userData.wobbling = false;
+    });
   }
 
   private handleResize(): void {
@@ -574,15 +979,19 @@ export class SceneManager {
 
     const time = this.timer.getElapsed();
     this.room.update(time);
+    this.flickTick?.();
     const flicker = this.table.update(time);
     this.candleLight.intensity = 60 * flicker;
     this.candleLight.position.set(this.table.flamePosition.x + Math.sin(time * 9) * 0.03, this.table.flamePosition.y, this.table.flamePosition.z);
     this.aiHand.update(delta, time);
     this.playerHand.update(delta, time);
+    this.rightHand.update(delta, time);
+    this.monkRightHand.update(delta, time);
     this.opponent.update(delta);
 
     // When the monk slams the table the whole view jolts, then settles.
     if (this.opponent.takeImpact()) this.shake = 1;
+    if (this.opponent.takeKnock()) this.shake = Math.max(this.shake, 0.3);
     this.shake *= Math.exp(-delta * 6);
 
     // Glide between the resting view and the reveal view.
@@ -619,6 +1028,8 @@ export class SceneManager {
     this.stop();
     this.tweens.finishAll();
     this.resizeObserver.disconnect();
+    this.canvas.removeEventListener('pointerdown', this.onPointerDown);
+    this.canvas.removeEventListener('pointermove', this.onPointerMove);
     this.pass.dispose();
     this.renderer.dispose();
   }

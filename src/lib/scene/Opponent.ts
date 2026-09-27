@@ -19,7 +19,7 @@ import {
 import type { EyeState } from './opponentArt';
 import { Spring } from './spring';
 
-export type OpponentMood = 'idle' | 'thinking' | 'calling' | 'tense' | 'impatient' | 'fuming' | 'gloating' | 'enraged';
+export type OpponentMood = 'idle' | 'thinking' | 'calling' | 'tense' | 'impatient' | 'fuming' | 'gloating' | 'enraged' | 'annoyed';
 
 /** The cut-out leans back by this much so it faces the camera's downward view. */
 const STAGE_TILT = -0.33;
@@ -64,7 +64,7 @@ interface Pose {
   tremble: number;
 }
 
-type HandMode = 'rest' | 'drum' | 'chin' | 'point' | 'fist' | 'claw' | 'stroke' | 'steeple' | 'slam';
+type HandMode = 'rest' | 'drum' | 'chin' | 'point' | 'fist' | 'claw' | 'stroke' | 'steeple' | 'slam' | 'knock';
 
 interface MoodSpec {
   pose: Pose;
@@ -117,6 +117,13 @@ const MOODS: Record<OpponentMood, MoodSpec> = {
     right: 'claw',
     drumSpeed: 1.5,
   },
+  // Poked at: a sour glance and a clenched fist.
+  annoyed: {
+    pose: pose({ lean: 0.1, headPitch: 0.1, headRoll: -0.1, browTilt: 1.1, browRaise: -0.1, eyeOpen: 0.42, rage: 0.35 }),
+    left: 'fist',
+    right: 'drum',
+    drumSpeed: 5,
+  },
   // He lost a die: he slams the table.
   enraged: {
     pose: pose({ lean: 0.28, headPitch: 0.14, browTilt: 1.3, eyeOpen: 1.3, rage: 1, grin: 0.75, tremble: 0.015 }),
@@ -141,6 +148,7 @@ const HAND_LOOK: Record<HandMode, { pose: HandPoseName; tilt: number; yaw: numbe
   fist: { pose: 'fist', tilt: 0, yaw: 0 },
   claw: { pose: 'claw', tilt: 0, yaw: 0 },
   slam: { pose: 'fist', tilt: 0, yaw: 0 },
+  knock: { pose: 'fist', tilt: 0, yaw: 0 },
   chin: { pose: 'fist', tilt: -1.25, yaw: Math.PI },
   stroke: { pose: 'flat', tilt: -1.2, yaw: Math.PI },
   steeple: { pose: 'cover', tilt: -1.15, yaw: Math.PI },
@@ -229,7 +237,12 @@ export class Opponent {
 
   private coverActive = false;
   private clearOfDice = false;
+  private rightHandOut = false;
   private mood: OpponentMood = 'idle';
+  private annoyedUntil = 0;
+  private knockStart = -10;
+  private lastKnockBeat = -1;
+  private pendingKnock = false;
   private moodStartedAt = 0;
   private time = 0;
 
@@ -320,6 +333,47 @@ export class Opponent {
     return this.stage.worldToLocal(world.clone());
   }
 
+  /** What he is showing: a poke overrides his mood for a moment. */
+  private get active(): OpponentMood {
+    return this.time < this.annoyedUntil ? 'annoyed' : this.mood;
+  }
+
+  /** He is prodded: a sour look, a shrug and a grunt. */
+  annoy(struck = false): void {
+    this.annoyedUntil = this.time + (struck ? 2.8 : 1.8);
+    this.shrug.velocity += struck ? 2 : 1.2;
+    // Hit by something, he rocks back before he glares.
+    if (struck) this.leanSpring.velocity -= 0.9;
+    this.speak(struck ? 0.9 : 0.5);
+    this.glanceAt(new THREE.Vector3(0, 2.5, 6), struck ? 2 : 1.2);
+  }
+
+  /** He raps the table twice with his right hand, to call. */
+  knock(): void {
+    this.knockStart = this.time;
+    this.lastKnockBeat = -1;
+  }
+
+  /** True once per rap, so the scene can jolt a little. */
+  takeKnock(): boolean {
+    const hit = this.pendingKnock;
+    this.pendingKnock = false;
+    return hit;
+  }
+
+  /** A box round his head and body for the pointer to hit. */
+  readonly hitbox: THREE.Mesh = (() => {
+    const box = new THREE.Mesh(new THREE.BoxGeometry(4.6, 5.4, 0.6), new THREE.MeshBasicMaterial({ visible: false }));
+    box.position.set(OPPONENT_X, 3.2, OPPONENT_Z + 0.6);
+    box.userData.pick = 'monk';
+    return box;
+  })();
+
+  /** The cards his puppet hands are drawn on. */
+  get handMeshes(): THREE.Mesh[] {
+    return this.hands.map((hand) => hand.hand.pickMesh);
+  }
+
   setMood(mood: OpponentMood): void {
     if (mood === this.mood) return;
     this.mood = mood;
@@ -351,6 +405,17 @@ export class Opponent {
     return this.hands[side].wrist.clone();
   }
 
+  /** Hides his resting right hand while a drawn copy of it is out doing something, or shows it again. */
+  setRightHandOut(out: boolean): void {
+    this.rightHandOut = out;
+  }
+
+  /** Hands the right hand back to the puppet, which takes it up from wherever the copy ended. */
+  releaseRightHand(at: THREE.Vector3): void {
+    this.hands[0].wrist.copy(at);
+    this.rightHandOut = false;
+  }
+
   /** Where that hand lies when it has nothing to do. */
   restPosition(side: 0 | 1): THREE.Vector3 {
     return this.handGoal(side, 'rest');
@@ -373,8 +438,8 @@ export class Opponent {
   update(deltaSeconds: number): void {
     this.time += deltaSeconds;
     const blend = 1 - Math.exp(-deltaSeconds * 2.2);
-    const target = { ...MOODS[this.mood].pose };
-    if (this.mood === 'thinking') {
+    const target = { ...MOODS[this.active].pose };
+    if (this.active === 'thinking') {
       for (const [key, delta] of Object.entries(THINK_VARIANTS[this.thinkVariant].delta)) target[key as keyof Pose] += delta;
     }
     for (const key of Object.keys(target) as (keyof Pose)[]) {
@@ -387,7 +452,7 @@ export class Opponent {
 
   private direct(): void {
     if (this.time < this.nextFidgetAt) return;
-    const restless = this.mood === 'impatient' || this.mood === 'fuming';
+    const restless = this.active === 'impatient' || this.active === 'fuming';
     // Usually he is still; restless, he keeps looking at you, at your dice, and away again.
     this.nextFidgetAt = this.time + (restless ? 1.4 + Math.random() * 2 : 5 + Math.random() * 6);
     const pick = Math.random();
@@ -417,7 +482,7 @@ export class Opponent {
     if (this.glance && this.time < this.glance.until) {
       this.gazeGoal.copy(this.glance.target);
     } else {
-      switch (this.mood) {
+      switch (this.active) {
         case 'thinking': {
           if (this.thinkVariant === 1) this.gazeGoal.copy(cover);
           else if (this.thinkVariant === 3) this.gazeGoal.copy(player);
@@ -538,6 +603,21 @@ export class Opponent {
     const restGoal = () => new THREE.Vector3(OPPONENT_X + (side === 0 ? (this.clearOfDice ? -5.3 : -3.3) : 2.2) + wander(t, side + 11) * 0.09, 0.34, -3.0 + wander(t, side + 13) * 0.07);
 
     switch (mode) {
+      case 'knock': {
+        // Two quick raps: the fist rises, drops and lands, twice.
+        const elapsed = t - this.knockStart;
+        const beat = elapsed / 0.42;
+        const lift = Math.abs(Math.sin(Math.PI * beat));
+        const goal = restGoal();
+        goal.y += 0.95 * lift;
+        goal.z += 0.55 * (1 - lift);
+        const landed = Math.floor(beat);
+        if (landed > this.lastKnockBeat && landed >= 1) {
+          this.lastKnockBeat = landed;
+          this.pendingKnock = true;
+        }
+        return goal;
+      }
       case 'chin':
         // The fist is held under the chin, its knuckles toward you.
         return chin().add(new THREE.Vector3(0.1 + wander(t, 15) * 0.05, -2.0 + wander(t, 16) * 0.05, 0.95));
@@ -576,9 +656,9 @@ export class Opponent {
   }
 
   private updateArms(dt: number, time: number): void {
-    const spec = MOODS[this.mood];
-    const variant = this.mood === 'thinking' ? THINK_VARIANTS[this.thinkVariant] : null;
-    const slamDone = this.mood === 'enraged' && this.time - this.moodStartedAt > 0.9;
+    const spec = MOODS[this.active];
+    const variant = this.active === 'thinking' ? THINK_VARIANTS[this.thinkVariant] : null;
+    const slamDone = this.active === 'enraged' && this.time - this.moodStartedAt > 0.9;
     const modes: readonly [HandMode, HandMode] = slamDone ? ['fist', 'fist'] : variant ? [variant.left, variant.right] : [spec.left, spec.right];
     const drumSpeed = variant ? variant.drumSpeed : spec.drumSpeed;
     const overrides = [this.handOverride.left, this.handOverride.right] as const;
@@ -586,17 +666,18 @@ export class Opponent {
     this.hands.forEach((hand, i) => {
       const side = i as 0 | 1;
       const override = overrides[side];
-      const mode = override ? 'rest' : modes[side];
+      const knocking = side === 0 && this.time - this.knockStart < 0.95;
+      const mode = knocking ? 'knock' : override ? 'rest' : modes[side];
       const look = HAND_LOOK[mode];
       const outward = side === 0 ? -1 : 1;
       const dragging = mode === 'drum' || mode === 'claw';
       hand.hand.setDrumming(dragging ? drumSpeed : 0, mode === 'claw' ? 0.5 : dragging ? 0.32 : 0);
       // Hands move deliberately, except the slam, which is fast.
-      const follow = dt === 0 ? 1 : 1 - Math.exp(-dt * (mode === 'slam' ? 16 : 3.2));
+      const follow = dt === 0 ? 1 : 1 - Math.exp(-dt * (mode === 'slam' || mode === 'knock' ? 16 : 3.2));
       const upright = mode === 'chin' || mode === 'stroke';
       const yaw = mode === 'steeple' ? Math.PI + outward * 0.3 : look.yaw + (upright ? 0 : outward * 0.22);
       hand.moveTo(this.handGoal(side, mode), { ...look, yaw }, follow, dt, time);
-      hand.hand.setVisible(!(side === 1 && this.coverActive));
+      hand.hand.setVisible(!(side === 1 && this.coverActive) && !(side === 0 && this.rightHandOut));
     });
   }
 }

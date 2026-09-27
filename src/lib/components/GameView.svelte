@@ -5,6 +5,7 @@
   import type { Bid, PlayerId } from '../game/types';
   import { STARTING_DICE } from '../game/match';
   import Banner from './Banner.svelte';
+  import type { LogEntry } from './Banner.svelte';
   import BidBubble from './BidBubble.svelte';
   import DiceCanvas from './DiceCanvas.svelte';
   import DiceCounter from './DiceCounter.svelte';
@@ -24,6 +25,25 @@
   const memory = new AiMemory();
   let diceCanvas: DiceCanvas;
   let busy = $state(false);
+  // A transcript of the game, for the paper strip along the bottom.
+  let history = $state<LogEntry[]>([]);
+  let round = 0;
+  let pendingLoser: PlayerId | null = null;
+  let flicking = $state(false);
+
+  async function flickPendingDie(): Promise<void> {
+    const loser = pendingLoser;
+    pendingLoser = null;
+    if (!loser) return;
+    // Yours waits for you to click the die; the banner says so.
+    flicking = loser === 'player';
+    await diceCanvas.loseDie(loser);
+    flicking = false;
+  }
+
+  function log(kind: LogEntry['kind'], text: string): void {
+    history.push({ kind, text });
+  }
 
   const RULES_SEEN_KEY = 'swindlestones:rules-seen';
 
@@ -49,6 +69,7 @@
   const showBidding = $derived(store.phase === 'bidding' && store.isPlayerTurn && !busy);
 
   const bannerText = $derived.by(() => {
+    if (flicking) return 'Choose one of your dice to flick away';
     switch (store.phase) {
       case 'awaitingRoll':
         return 'Roll the dice to begin';
@@ -87,12 +108,23 @@
 
   /** Reveals the hands, then records the call, so the result only shows once the dice are visible. */
   async function resolveCall(by: PlayerId): Promise<void> {
+    log(by === 'player' ? 'you' : 'monk', by === 'player' ? 'You call!' : 'Opponent calls!');
+    await diceCanvas.knock(by);
     await diceCanvas.reveal();
     store.call(by);
+    const shown = store.lastCallResult;
+    const bid = store.currentBid;
+    if (shown && bid) {
+      log('result', `${shown.loser === 'player' ? 'You lose' : 'Opponent loses'} a die: there ${shown.actualCount === 1 ? 'was' : 'were'} ${describeCount(shown.actualCount, bid.face)}.`);
+      log('result', `Yours: ${store.playerHand.join(' ')}. His: ${store.state.hands.ai.join(' ')}.`);
+    }
     if (by === 'ai' && store.lastCallResult) memory.recordPlayerBidTested(store.lastCallResult.bidWasTrue);
     const opponentLost = store.lastCallResult?.loser === 'ai';
     diceCanvas.setMood(opponentLost ? 'enraged' : 'gloating');
     diceCanvas.speak(opponentLost ? 1 : 1.6);
+    // The loser flicks a die away once the next round begins, so the reveal can be read first.
+    pendingLoser = store.lastCallResult?.loser ?? null;
+    if (store.phase === 'matchOver') await flickPendingDie();
   }
 
   async function runOpponentTurnIfDue(): Promise<void> {
@@ -115,6 +147,7 @@
       await delay(OPPONENT_CALL_MS);
       await resolveCall('ai');
     } else {
+      log('monk', `Opponent bids ${describeBid(decision.bid)}.`);
       store.submitBid('ai', decision.bid);
       diceCanvas.speak(0.9 + decision.bid.quantity * 0.12);
       diceCanvas.setMood('idle');
@@ -126,9 +159,12 @@
   async function startRound(): Promise<void> {
     stopWaiting();
     busy = true;
+    await flickPendingDie();
     diceCanvas.setMood('idle');
     memory.startRound();
     store.startRound();
+    round += 1;
+    log('round', `Round ${round}: ${store.diceCounts.player} dice against ${store.diceCounts.ai}`);
     await diceCanvas.roll({ player: store.playerHand, ai: store.state.hands.ai });
     busy = false;
     if (store.isPlayerTurn) startWaiting();
@@ -140,6 +176,7 @@
     stopWaiting();
     if (store.currentBid !== null) memory.recordPlayerResponse(false);
     memory.recordPlayerBid(bid);
+    log('you', `You bid ${describeBid(bid)}.`);
     store.submitBid('player', bid);
     void runOpponentTurnIfDue();
   }
@@ -157,6 +194,9 @@
   function playAgain(): void {
     stopWaiting();
     store.reset();
+    pendingLoser = null;
+    history = [];
+    round = 0;
     diceCanvas.clear();
     diceCanvas.setMood('idle');
   }
@@ -182,7 +222,7 @@
       </button>
     {/if}
 
-    <Banner text={bannerText} />
+    <Banner text={bannerText} {history} />
   </div>
 
   {#if store.phase === 'matchOver' && store.winner}

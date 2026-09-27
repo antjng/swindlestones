@@ -25,6 +25,16 @@
     return sceneManager?.revealHands() ?? Promise.resolve();
   }
 
+  /** Raps on the table to call: his right hand for the opponent, yours for you. */
+  export function knock(by: 'player' | 'ai'): Promise<void> {
+    return sceneManager?.knockTable(by) ?? Promise.resolve();
+  }
+
+  /** The loser of a die flicks one off the table. */
+  export function loseDie(who: 'player' | 'ai'): Promise<void> {
+    return sceneManager?.loseDie(who) ?? Promise.resolve();
+  }
+
   export function speak(seconds: number): void {
     sceneManager?.speak(seconds);
   }

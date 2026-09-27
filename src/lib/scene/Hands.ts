@@ -52,6 +52,10 @@ export class FlatHand {
   private shadowTexture: THREE.CanvasTexture;
   private lean = 0.12;
   private readonly card: THREE.Mesh;
+  /** Where the pivot would sit with no poke on it. */
+  private readonly base = new THREE.Vector3();
+  private readonly pokeOffset = new THREE.Vector3();
+  private readonly pokeVelocity = new THREE.Vector3();
   private readonly material: THREE.MeshBasicMaterial;
   private readonly canvas = document.createElement('canvas');
   private readonly ctx: CanvasRenderingContext2D;
@@ -62,6 +66,8 @@ export class FlatHand {
   private factor = 1;
   private pixelsPerUnit = 20;
   private palmView = false;
+  /** Where the index fingertip was drawn, in the card's drawing space, and which way round the card was drawn. */
+  private indexTip = { u: 0, v: 0, sign: 1 };
 
   private pose: HandPose = HAND_POSES.relaxed;
   private readonly flex = [0, 0, 0, 0].map(() => new Spring(0.2, 150, 13));
@@ -80,6 +86,7 @@ export class FlatHand {
     const geometry = new THREE.PlaneGeometry(CARD_U * 2, CARD_V_MAX - CARD_V_MIN);
     geometry.translate(0, (CARD_V_MAX + CARD_V_MIN) / 2, 0);
     this.card = new THREE.Mesh(geometry, this.material);
+    this.card.userData.hand = this;
     this.pivot.add(this.card);
 
     this.shadowTexture = new THREE.CanvasTexture(this.shadowCanvas);
@@ -113,8 +120,9 @@ export class FlatHand {
     const size = this.scale * this.factor;
     const reach = (HAND_SIZE.palmLength + HAND_SIZE.fingerLength) * size;
     const lowest = Math.min(f.y * reach, f.y * reach * 0.5 - Math.abs(x.y) * 1.3 * size, -Math.abs(x.y) * 1.3 * size);
-    this.pivot.position.copy(wrist);
-    this.pivot.position.y += Math.max(0, 0.05 - (wrist.y + lowest));
+    this.base.copy(wrist);
+    this.base.y += Math.max(0, 0.05 - (wrist.y + lowest));
+    this.pivot.position.copy(this.base).add(this.pokeOffset);
     this.wrist.copy(wrist);
 
     this.projectShadow();
@@ -152,6 +160,17 @@ export class FlatHand {
 
   update(deltaSeconds: number, timeSeconds: number): void {
     if (!this.visible) return;
+    if (this.pokeOffset.lengthSq() > 1e-6 || this.pokeVelocity.lengthSq() > 1e-6) {
+      // A springy recoil, back to where the hand belongs.
+      const steps = Math.max(1, Math.ceil(deltaSeconds / 0.016));
+      const dt = deltaSeconds / steps;
+      for (let i = 0; i < steps; i++) {
+        this.pokeVelocity.addScaledVector(this.pokeOffset, -90 * dt).addScaledVector(this.pokeVelocity, -9 * dt);
+        this.pokeOffset.addScaledVector(this.pokeVelocity, dt);
+      }
+      this.pivot.position.copy(this.base).add(this.pokeOffset);
+      this.projectShadow();
+    }
     this.step(deltaSeconds, timeSeconds);
     this.draw();
   }
@@ -210,6 +229,34 @@ export class FlatHand {
     });
     positions.needsUpdate = true;
     this.shadowMaterial.opacity = THREE.MathUtils.clamp(0.55 - height * 0.1, 0.12, 0.55);
+  }
+
+  /** The card that stands in for the hand, for picking with the pointer. */
+  get pickMesh(): THREE.Mesh {
+    return this.card;
+  }
+
+  /** Whether the point of the card at these texture coordinates is part of the drawn hand and not empty space around it. */
+  isSolidAt(uv: THREE.Vector2): boolean {
+    const x = Math.min(this.canvas.width - 1, Math.max(0, Math.floor(uv.x * this.canvas.width)));
+    const y = Math.min(this.canvas.height - 1, Math.max(0, Math.floor((1 - uv.y) * this.canvas.height)));
+    return this.ctx.getImageData(x, y, 1, 1).data[3] > 0;
+  }
+
+  /** Draws the hand now, in its current pose and placement, rather than waiting for the next frame. */
+  redraw(): void {
+    this.draw();
+  }
+
+  /** Where the tip of the index finger is in the world, as it was last drawn. */
+  fingertip(): THREE.Vector3 {
+    this.card.updateWorldMatrix(true, false);
+    return this.card.localToWorld(new THREE.Vector3(this.indexTip.sign * this.indexTip.u, this.indexTip.v, 0));
+  }
+
+  /** Shoves the hand away from the camera a little; it springs back on its own. */
+  poke(): void {
+    this.pokeVelocity.add(new THREE.Vector3((Math.random() - 0.5) * 1.2, 0.5, -5.5));
   }
 
   /** Draws the hand at a fraction of its size; the shadow and lift follow on the next placement. */
@@ -337,6 +384,8 @@ export class FlatHand {
         thumb.push({ u: last.u + Math.sin(angle) * length, v: last.v + Math.cos(angle) * length, z: 0 });
       });
     }
+
+    this.indexTip = { u: chains[0].joints[3].u, v: chains[0].joints[3].v, sign: m };
 
     // Everything's silhouette first, in ink, so the hand reads as one drawn shape.
     polygon(palm, INK, 0, 0, 0, outline);
