@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { createRoom, joinRoom, normaliseCode } from '../net/peerTransport';
   import type { Room } from '../net/peerTransport';
   import { OnlineSession } from '../net/session';
+  import DiceCanvas from './DiceCanvas.svelte';
   import DieIcon from './DieIcon.svelte';
 
   interface Props {
@@ -19,6 +20,8 @@
   let error = $state('');
   let copied = $state(false);
   let room: Room | null = null;
+  // The monk waiting at his table, idling behind the card: the same scene the game itself uses, so the title screen is never still.
+  let diceCanvas: DiceCanvas;
 
   const invite = $derived(`${location.origin}${location.pathname}#room=${code}`);
 
@@ -74,10 +77,17 @@
       void join(typed);
     }
   });
+
+  // He doesn't just sit there: every so often, unprompted, he turns something over in his head.
+  const moodTimer = setInterval(() => diceCanvas?.setMood(Math.random() < 0.6 ? 'thinking' : 'idle'), 7000);
+  onDestroy(() => clearInterval(moodTimer));
 </script>
 
 <div class="lobby">
-  <div class="glow" aria-hidden="true"></div>
+  <div class="backdrop" aria-hidden="true">
+    <DiceCanvas bind:this={diceCanvas} />
+  </div>
+  <div class="vignette" aria-hidden="true"></div>
   <div class="grain" aria-hidden="true"></div>
 
   <div class="card">
@@ -162,32 +172,24 @@
     place-items: center;
     padding: 1rem;
     overflow: hidden;
-    /* A dim hall, lit from above, in the same browns as the table scene's wood. */
-    background:
-      radial-gradient(ellipse 60% 45% at 50% 8%, rgba(255, 154, 68, 0.1) 0%, transparent 70%),
-      radial-gradient(ellipse 90% 70% at 50% 38%, #2e180c 0%, #170c07 55%, #070403 100%);
+    /* A plain fallback behind the live scene, for the instant before it has painted a first frame. */
+    background: #070403;
   }
-  /* A slow, uneven breathing glow, as if a lantern hung just out of frame. */
-  .glow {
+  /* The monk, waiting at his own table: the same animated scene the game plays on, idling behind the card
+     so the title screen breathes, flickers and mills about on its own, rather than sitting still. */
+  .backdrop {
     position: absolute;
-    top: -12%;
-    left: 50%;
-    width: 46rem;
-    height: 46rem;
-    transform: translateX(-50%);
-    background: radial-gradient(circle, rgba(255, 174, 98, 0.16) 0%, rgba(255, 154, 68, 0.05) 45%, transparent 72%);
-    animation: breathe 5.5s ease-in-out infinite alternate;
-    pointer-events: none;
+    inset: 0;
   }
-  @keyframes breathe {
-    from {
-      opacity: 0.75;
-      transform: translateX(-50%) scale(0.97);
-    }
-    to {
-      opacity: 1;
-      transform: translateX(-50%) scale(1.03);
-    }
+  .backdrop :global(canvas) {
+    filter: saturate(0.85) brightness(0.9);
+  }
+  /* Darkens the edges so the eye settles on the card, and dims the scene a touch behind it. */
+  .vignette {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse 60% 55% at 50% 48%, rgba(5, 3, 2, 0.35) 0%, rgba(5, 3, 2, 0.6) 55%, rgba(5, 3, 2, 0.88) 100%);
+    pointer-events: none;
   }
   /* A faint dither of dots, echoing the ordered-dither look of the table scene. */
   .grain {
@@ -195,7 +197,7 @@
     inset: 0;
     background-image: radial-gradient(rgba(255, 255, 255, 0.5) 1px, transparent 1px);
     background-size: 3px 3px;
-    opacity: 0.04;
+    opacity: 0.05;
     mix-blend-mode: overlay;
     pointer-events: none;
   }
