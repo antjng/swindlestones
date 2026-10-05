@@ -3,6 +3,7 @@
   import { createRoom, joinRoom, normaliseCode } from '../net/peerTransport';
   import type { Room } from '../net/peerTransport';
   import { OnlineSession } from '../net/session';
+  import DieIcon from './DieIcon.svelte';
 
   interface Props {
     onPlayMonk: () => void;
@@ -76,14 +77,42 @@
 </script>
 
 <div class="lobby">
+  <div class="glow" aria-hidden="true"></div>
+  <div class="grain" aria-hidden="true"></div>
+
   <div class="card">
-    <h1>Swindlestones</h1>
-    <p class="tag">A game of dice, nerve, and lies.</p>
+    <header class="masthead">
+      <div class="dice-flank left" aria-hidden="true">
+        <span class="die blue" style="--tilt: -14deg"><DieIcon face={3} size={30} /></span>
+        <span class="die red" style="--tilt: 8deg"><DieIcon face={1} size={22} /></span>
+      </div>
+
+      <div class="title-block">
+        <h1>Swindlestones</h1>
+        <div class="flourish" aria-hidden="true">
+          <span class="rule"></span>
+          <svg viewBox="0 0 24 24" width="13" height="13" class="mark"><polygon points="12,1 19,5.5 23,12 19,18.5 12,23 5,18.5 1,12 5,5.5" /></svg>
+          <span class="rule"></span>
+        </div>
+        <p class="tag">A game of dice, nerve, and lies.</p>
+      </div>
+
+      <div class="dice-flank right" aria-hidden="true">
+        <span class="die red" style="--tilt: -8deg"><DieIcon face={4} size={22} /></span>
+        <span class="die blue" style="--tilt: 15deg"><DieIcon face={2} size={30} /></span>
+      </div>
+    </header>
 
     {#if step === 'choose'}
       <div class="choices">
-        <button class="big" onclick={onPlayMonk}>Play the monk</button>
-        <button class="big" onclick={() => (step = 'friend')}>Play a friend</button>
+        <div class="option">
+          <button class="big" onclick={onPlayMonk}>Play the Monk</button>
+          <p class="hint">Try your nerve against a cunning, watchful opponent.</p>
+        </div>
+        <div class="option">
+          <button class="big" onclick={() => (step = 'friend')}>Play a Friend</button>
+          <p class="hint">Open a table online and swindle someone you know.</p>
+        </div>
       </div>
     {:else if step === 'friend'}
       <div class="friend">
@@ -132,25 +161,125 @@
     display: grid;
     place-items: center;
     padding: 1rem;
-    background: radial-gradient(ellipse at 50% 40%, #2a180a 0%, #0a0503 70%);
+    overflow: hidden;
+    /* A dim hall, lit from above, in the same browns as the table scene's wood. */
+    background:
+      radial-gradient(ellipse 60% 45% at 50% 8%, rgba(255, 154, 68, 0.1) 0%, transparent 70%),
+      radial-gradient(ellipse 90% 70% at 50% 38%, #2e180c 0%, #170c07 55%, #070403 100%);
   }
+  /* A slow, uneven breathing glow, as if a lantern hung just out of frame. */
+  .glow {
+    position: absolute;
+    top: -12%;
+    left: 50%;
+    width: 46rem;
+    height: 46rem;
+    transform: translateX(-50%);
+    background: radial-gradient(circle, rgba(255, 174, 98, 0.16) 0%, rgba(255, 154, 68, 0.05) 45%, transparent 72%);
+    animation: breathe 5.5s ease-in-out infinite alternate;
+    pointer-events: none;
+  }
+  @keyframes breathe {
+    from {
+      opacity: 0.75;
+      transform: translateX(-50%) scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: translateX(-50%) scale(1.03);
+    }
+  }
+  /* A faint dither of dots, echoing the ordered-dither look of the table scene. */
+  .grain {
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(rgba(255, 255, 255, 0.5) 1px, transparent 1px);
+    background-size: 3px 3px;
+    opacity: 0.04;
+    mix-blend-mode: overlay;
+    pointer-events: none;
+  }
+
   .card {
-    width: min(26rem, 100%);
-    padding: 2rem 2.2rem 2.2rem;
+    position: relative;
+    width: min(30rem, 100%);
+    padding: 2.1rem clamp(1.2rem, 6vw, 2.4rem) 2.6rem;
     text-align: center;
     background: var(--paper-light);
+    background-image: radial-gradient(ellipse at 20% 15%, rgba(0, 0, 0, 0.05), transparent 55%), radial-gradient(ellipse at 85% 90%, rgba(0, 0, 0, 0.05), transparent 55%);
     border: 3px double var(--ink);
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+    /* The torn bottom edge needs a drop-shadow, not a box-shadow: a box-shadow would be clipped square by it. */
+    filter: drop-shadow(0 14px 34px rgba(0, 0, 0, 0.65)) drop-shadow(0 0 40px rgba(255, 154, 68, 0.08));
+    clip-path: polygon(
+      0 0, 100% 0, 100% calc(100% - 2px), 96% calc(100% - 6px), 91% calc(100% - 1px), 84% calc(100% - 7px),
+      76% calc(100% - 2px), 68% calc(100% - 8px), 60% calc(100% - 1px), 52% calc(100% - 6px), 44% calc(100% - 1px),
+      36% calc(100% - 8px), 29% calc(100% - 2px), 22% calc(100% - 7px), 15% calc(100% - 1px), 9% calc(100% - 8px),
+      4% calc(100% - 2px), 0 calc(100% - 9px)
+    );
   }
+
+  .masthead {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.4rem;
+    margin-bottom: 1.5rem;
+  }
+  .title-block {
+    flex: 1;
+    min-width: 0;
+  }
+  .dice-flank {
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
+    flex-shrink: 0;
+  }
+  .dice-flank.right {
+    flex-direction: row-reverse;
+  }
+  .die {
+    display: inline-flex;
+    transform: rotate(var(--tilt));
+    filter: drop-shadow(1px 2px 1px rgba(0, 0, 0, 0.35));
+  }
+  .die.blue {
+    color: #2b508c;
+  }
+  .die.red {
+    color: #7e1c1c;
+  }
+
   h1 {
     margin: 0;
-    font-size: 2.4rem;
+    font-size: clamp(1.7rem, 6vw + 0.6rem, 2.6rem);
+    letter-spacing: 0.1em;
+    color: var(--ink);
+    text-shadow: 0 0 22px rgba(255, 154, 68, 0.3), 0 1px 0 rgba(255, 255, 255, 0.25);
+    /* "Swindlestones" is one long word: on the narrowest screens it may still need to break rather than overflow. */
+    overflow-wrap: break-word;
+  }
+  .flourish {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    width: 78%;
+    margin: 0.35rem auto 0.3rem;
+  }
+  .flourish .rule {
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--ink-soft), transparent);
+  }
+  .flourish .mark polygon {
+    fill: var(--blood);
   }
   .tag {
-    margin: 0.2rem 0 1.6rem;
+    margin: 0.3rem 0 0;
     font-style: italic;
     color: var(--ink-soft);
   }
+
   .choices,
   .friend,
   .waiting {
@@ -159,9 +288,20 @@
     align-items: stretch;
     gap: 0.9rem;
   }
+  .option {
+    display: flex;
+    flex-direction: column;
+    gap: 0.3rem;
+  }
   .big {
-    padding: 0.7rem 1rem;
-    font-size: 1.3rem;
+    padding: 0.75rem 1rem;
+    font-size: 1.35rem;
+  }
+  .hint {
+    margin: 0;
+    font-size: 0.92rem;
+    font-style: italic;
+    color: var(--ink-soft);
   }
   .or {
     margin: 0.2rem 0 0;
@@ -212,5 +352,11 @@
   .error {
     margin: 0;
     color: var(--blood);
+  }
+
+  @media (max-width: 30rem) {
+    .dice-flank {
+      display: none;
+    }
   }
 </style>
